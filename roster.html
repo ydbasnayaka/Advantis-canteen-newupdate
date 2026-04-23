@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>CanteenOS | Personnel Roster</title>
+    <title>Enterprise | Personnel Roster</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -89,35 +89,24 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // ============================================================
-        //  FIREBASE CONFIGURATION (SYNCED WITH INDEX.HTML)
-        // ============================================================
-        const firebaseConfig = {
-            apiKey: "AIzaSyAfKp8gWavPxo5EZafetpeADh7eeRHQQx0",
-            authDomain: "canteen-2d80d.firebaseapp.com",
-            projectId: "canteen-2d80d",
-            storageBucket: "canteen-2d80d.firebasestorage.app",
-            messagingSenderId: "835222412943",
-            appId: "1:835222412943:web:8db25547c45a1f0e1d5afa"
+        // Firebase Config (Matches Dashboard & Other Apps)
+        const appConfig = {
+            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+            messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+            appId: import.meta.env.VITE_FIREBASE_APP_ID
         };
-        
-        let appConfig = firebaseConfig;
-        if (typeof __firebase_config !== 'undefined') { 
-            try {
-                appConfig = typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
-            } catch (e) {
-                console.warn("Could not parse __firebase_config", e);
-            }
-        }
 
         const app = initializeApp(appConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = (typeof __app_id !== 'undefined') ? __app_id : 'canteen-os-live';
+        const appId = (typeof __app_id !== 'undefined') ? __app_id : 'enterprise-dashboard-v1';
 
         // State
         let personnelList = {};
-        const SYS_SESSION_KEY = `canteen_sys_session_${appId}`; // Synced session key
+        const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
         let loggedInSysUser = null;
         let isEditing = false;
         let currentPhotoBase64 = null;
@@ -179,13 +168,15 @@
         };
 
         window.goToDashboard = () => {
-            window.location.href = 'index.html'; // Navigate back to the main dashboard
+            try {
+                if (window.location.protocol === 'blob:') window.history.back();
+                else window.location.href = 'index.html';
+            } catch (e) { window.history.back(); }
         };
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
                 const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
-                // Allow persistent session for hardcoded master
                 if (sessionStr) {
                     const session = JSON.parse(sessionStr);
                     loggedInSysUser = { username: session.username };
@@ -206,13 +197,13 @@
         initAuth();
 
         const loadData = () => {
-            // SYNCED: Listen to CanteenOS 'employees' database collection
-            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'employees');
+            // Listen to Personnel DB (Using 'personnel' to sync with Attendance & Canteen apps)
+            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'personnel');
             onSnapshot(pRef, (snap) => {
                 personnelList = {};
                 snap.forEach(doc => personnelList[doc.id] = { id: doc.id, ...doc.data() });
                 window.renderStaffDirectory();
-            }, (err) => console.error("Employees sync err:", err));
+            }, (err) => console.error("Personnel sync err:", err));
         };
 
         // ============================================================
@@ -227,8 +218,8 @@
             showScanResultModal('SEARCHING...', 'Querying personnel database...', 'info');
 
             try {
-                // Find user by ID
-                const emp = Object.values(personnelList).find(p => p.id === val);
+                // Find user by empId or doc id
+                const emp = Object.values(personnelList).find(p => p.empId === val || p.id === val);
                 
                 if (emp) {
                     playBeep('success');
@@ -408,9 +399,9 @@
             let employees = Object.values(personnelList);
             if (searchVal) {
                 employees = employees.filter(emp => {
-                    const id = emp.id ? emp.id.toLowerCase() : '';
+                    const id = emp.empId ? emp.empId.toLowerCase() : (emp.id ? emp.id.toLowerCase() : '');
                     const name = emp.name ? emp.name.toLowerCase() : '';
-                    const dept = emp.dept ? emp.dept.toLowerCase() : '';
+                    const dept = emp.department ? emp.department.toLowerCase() : (emp.dept ? emp.dept.toLowerCase() : '');
                     
                     return id.includes(searchVal) || name.includes(searchVal) || dept.includes(searchVal);
                 });
@@ -433,13 +424,13 @@
 
                 const safeName = (emp.name || '').replace(/'/g, "\\'");
                 const safeAccount = (emp.accountName || '').replace(/'/g, "\\'");
-                const displayId = emp.id;
-                const statusBadge = (!emp.status || emp.status === 'ACTIVE') ? '<span class="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded text-[10px] font-bold">ACTIVE</span>' : '<span class="text-red-500 bg-red-500/10 px-2 py-1 rounded text-[10px] font-bold">INACTIVE</span>';
+                const displayId = emp.empId || emp.id;
+                const statusBadge = emp.status === 'ACTIVE' ? '<span class="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded text-[10px] font-bold">ACTIVE</span>' : '<span class="text-red-500 bg-red-500/10 px-2 py-1 rounded text-[10px] font-bold">INACTIVE</span>';
 
                 tr.innerHTML = `
                     <td class="px-6 py-4 text-sm font-bold text-slate-800 dark:text-white tracking-wide font-mono">${displayId}</td>
                     <td class="px-6 py-4 text-sm flex items-center font-bold text-slate-700 dark:text-slate-200">${photoHtml} ${emp.name}</td>
-                    <td class="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">${emp.dept || '-'}</td>
+                    <td class="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">${emp.department || emp.dept || '-'}</td>
                     <td class="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">${emp.site || '-'}</td>
                     <td class="px-6 py-4">${statusBadge}</td>
                     <td class="px-6 py-4 text-sm text-right">
@@ -458,23 +449,22 @@
             const empId = document.getElementById('new-emp-id').value.trim().toUpperCase();
             if (!empId) return showToast('ID required', 'error');
             
-            // MAP: Synced to CanteenOS 'employees' field requirements exactly
+            // Map to standard personnel structure used in Attendance App
             const staffData = {
-                id: empId, 
+                empId: empId, // Support both empId and id for cross-compatibility
                 name: document.getElementById('new-emp-name').value.trim(),
-                dept: document.getElementById('new-dept-name').value.trim(),
+                department: document.getElementById('new-dept-name').value.trim(), // Use 'department' for attendance app sync
                 site: document.getElementById('new-site-name').value.trim(),
                 accountName: document.getElementById('new-acct-name').value.trim() || 'CTE',
                 companyName: document.getElementById('new-comp-name').value.trim(),
-                status: document.getElementById('new-status').value, // Used internally in roster
+                status: document.getElementById('new-status').value,
                 updatedAt: serverTimestamp()
             };
             
             if (currentPhotoBase64) staffData.photoData = currentPhotoBase64;
 
             try {
-                // UPDATE TARGET: 'employees' collection 
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', empId), staffData, { merge: true });
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'personnel', empId), staffData, { merge: true });
                 window.showToast(isEditing ? 'Profile Updated' : 'Profile Created', 'success');
                 resetStaffForm();
                 switchStaffTab('directory');
@@ -487,9 +477,9 @@
         window.editStaff = (id) => {
             const emp = personnelList[id];
             if (!emp) return;
-            document.getElementById('new-emp-id').value = emp.id;
+            document.getElementById('new-emp-id').value = emp.empId || emp.id;
             document.getElementById('new-emp-name').value = emp.name || '';
-            document.getElementById('new-dept-name').value = emp.dept || '';
+            document.getElementById('new-dept-name').value = emp.department || emp.dept || '';
             document.getElementById('new-site-name').value = emp.site || '';
             document.getElementById('new-acct-name').value = emp.accountName || 'CTE';
             document.getElementById('new-comp-name').value = emp.companyName || '';
@@ -515,7 +505,7 @@
 
         window.deleteStaff = async (id) => {
             if(confirm(`Permanently delete record for ${id}?`)) {
-                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'employees', id));
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'personnel', id));
                 window.showToast('Record Deleted', 'success');
             }
         };
@@ -560,7 +550,7 @@
     <nav class="bg-[#0B1120] text-white shadow-xl sticky top-0 z-40 border-b border-slate-800">
         <div class="container mx-auto px-6 py-4 flex justify-between items-center">
             <div class="flex items-center gap-4">
-                <button onclick="goToDashboard()" class="hover:bg-slate-800 p-2 rounded-lg text-slate-300 transition-colors bg-slate-800/50" title="Return to CanteenOS">
+                <button onclick="goToDashboard()" class="hover:bg-slate-800 p-2 rounded-lg text-slate-300 transition-colors bg-slate-800/50">
                     <i class="fas fa-arrow-left"></i>
                 </button>
                 <div class="bg-indigo-600 rounded-lg w-10 h-10 flex items-center justify-center shadow-[0_0_15px_rgba(79,70,229,0.4)]">
@@ -571,7 +561,7 @@
             
             <div class="flex items-center gap-4">
                 <div class="hidden md:block text-xs font-bold uppercase bg-slate-800 border border-slate-700 px-4 py-2.5 rounded-lg text-indigo-400 tracking-wider">
-                    <i class="fas fa-database mr-1 align-middle"></i> CANTEEN OS DB
+                    <i class="fas fa-database mr-1 align-middle"></i> DB ONLINE
                 </div>
             </div>
         </div>
@@ -586,7 +576,7 @@
                 <div class="relative inline-flex rounded-full h-10 w-10 bg-indigo-600 shadow-[0_0_30px_rgba(79,70,229,0.8)]"></div>
             </div>
             <div class="mt-8 text-center space-y-2">
-                <h2 class="text-white font-extrabold text-2xl tracking-tight">Syncing Canteen DB...</h2>
+                <h2 class="text-white font-extrabold text-2xl tracking-tight">Syncing Roster...</h2>
             </div>
         </div>
 
@@ -596,9 +586,9 @@
                 <div class="absolute -top-20 -right-20 w-40 h-40 bg-red-500/10 rounded-full blur-3xl pointer-events-none"></div>
                 <i class="fas fa-shield-alt text-6xl text-red-500 mb-6 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]"></i>
                 <h2 class="text-2xl font-extrabold text-white mb-3">Access Denied</h2>
-                <p class="text-slate-400 text-sm mb-8 leading-relaxed font-medium">Valid session token missing. Please authenticate through the primary CanteenOS Dashboard to access this terminal.</p>
+                <p class="text-slate-400 text-sm mb-8 leading-relaxed font-medium">Valid session token missing. Please authenticate through the primary Enterprise Dashboard to access this terminal.</p>
                 <button onclick="goToDashboard()" class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3.5 rounded-xl border border-slate-700 transition-colors text-sm tracking-wider uppercase">
-                    Return to CanteenOS
+                    Return to Dashboard
                 </button>
             </div>
         </div>
@@ -609,7 +599,7 @@
                 <h2 class="text-3xl font-extrabold text-slate-800 dark:text-white tracking-tight flex items-center gap-3">
                     Master Identity Database
                 </h2>
-                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">Manage CanteenOS personnel profiles, generate secure badges, and configure system clearance.</p>
+                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">Manage workforce personnel, generate secure identity badges, and configure system clearance.</p>
             </div>
 
             <!-- RAPID SCANNER MODULE FOR LOOKUP -->
