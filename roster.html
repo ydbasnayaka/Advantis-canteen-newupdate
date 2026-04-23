@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Enterprise | Personnel Roster</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: { slate: { 850: '#152033' } },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Google Fonts & FontAwesome -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- QR Code Libs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* --- PROFESSIONAL PRINT ENGINE --- */
+        @media print {
+            body > * { display: none !important; }
+            #print-overlay {
+                display: block !important;
+                position: fixed;
+                top: 0; left: 0; width: 100%; height: 100%;
+                background: white; z-index: 9999; padding: 0; margin: 0;
+            }
+            .print-mode-single {
+                display: flex !important; justify-content: center; align-items: center;
+                height: 100%; width: 100%;
+            }
+            .id-card-element {
+                box-shadow: none !important;
+                page-break-inside: avoid; margin: 0 auto;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+            @page { size: auto; margin: 5mm; }
+        }
+        #print-overlay { display: none; }
+
+        .hide-scroll::-webkit-scrollbar { display: none; }
+        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .scanner-input { 
+            letter-spacing: 0.2em; 
+            font-weight: 800; 
+            caret-color: transparent; 
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .dark ::-webkit-scrollbar-thumb { background: #475569; }
+        
+        /* QR Scanner Custom Overrides */
+        #qr-reader { border: none !important; border-radius: 1.5rem; overflow: hidden; }
+        #qr-reader__scan_region { background: #0f172a; }
+        #qr-reader__dashboard { padding: 1rem !important; background: #1e293b; color: white !important; display: none !important; }
+        #qr-reader video { object-fit: cover !important; }
+    </style>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Config (Matches Dashboard & Other Apps)
+        const appConfig = {
+            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+            messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+            appId: import.meta.env.VITE_FIREBASE_APP_ID
+        };
+
+        const app = initializeApp(appConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = (typeof __app_id !== 'undefined') ? __app_id : 'enterprise-dashboard-v1';
+
+        // State
+        let personnelList = {};
+        const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
+        let loggedInSysUser = null;
+        let isEditing = false;
+        let currentPhotoBase64 = null;
+        
+        // Scanning State
+        let isScanning = false;
+        let html5QrcodeScanner = null;
+        let scanDebounceTimer = null;
+
+        document.documentElement.classList.add('dark');
+
+        window.showToast = (message, type = 'success') => {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const colors = type === 'success' ? 'bg-indigo-500 border-indigo-600' : type === 'error' ? 'bg-red-500 border-red-600' : 'bg-slate-700 border-slate-600';
+            const icon = type === 'success' ? 'fa-check-circle' : type === 'error' ? 'fa-exclamation-triangle' : 'fa-info-circle';
+            toast.className = `${colors} text-white px-4 py-3 rounded-xl shadow-lg border flex items-center gap-3 animate-fade-in text-sm font-bold mt-2`;
+            toast.innerHTML = `<i class="fas ${icon}"></i> <span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0'; toast.style.transform = 'translateY(10px)'; toast.style.transition = 'all 0.3s ease';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        };
+
+        // UI Modal for scanning feedback
+        window.showScanResultModal = (title, message, type) => {
+            const modal = document.getElementById('result-modal');
+            const iconEl = document.getElementById('res-icon');
+            const bgEl = document.getElementById('res-bg');
+            document.getElementById('res-title').textContent = title;
+            document.getElementById('res-msg').textContent = message;
+            
+            iconEl.classList.remove('hidden');
+            if (type === 'success') { iconEl.className = "fas fa-check-circle text-6xl text-white mb-4 drop-shadow-md"; }
+            else if (type === 'error') { iconEl.className = "fas fa-times-circle text-6xl text-white mb-4 drop-shadow-md"; }
+            else if (type === 'warning') { iconEl.className = "fas fa-exclamation-triangle text-6xl text-white mb-4 drop-shadow-md"; }
+            else { iconEl.className = "fas fa-spinner fa-spin text-6xl text-white mb-4 drop-shadow-md"; }
+            
+            modal.classList.remove('hidden');
+            if (type === 'success') { bgEl.className = "bg-gradient-to-br from-indigo-500 to-indigo-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            else if (type === 'error') { bgEl.className = "bg-gradient-to-br from-slate-600 to-slate-700 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            else if (type === 'warning') { bgEl.className = "bg-gradient-to-br from-amber-500 to-orange-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            else { bgEl.className = "bg-gradient-to-br from-blue-500 to-blue-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            
+            if(title !== 'SEARCHING...') {
+                setTimeout(() => modal.classList.add('hidden'), 1200);
+            }
+        };
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) { console.error("Auth Error:", err); }
+        };
+
+        window.goToDashboard = () => {
+            try {
+                if (window.location.protocol === 'blob:') window.history.back();
+                else window.location.href = 'index.html';
+            } catch (e) { window.history.back(); }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                if (sessionStr) {
+                    const session = JSON.parse(sessionStr);
+                    loggedInSysUser = { username: session.username };
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-staff').classList.remove('hidden');
+                    loadData();
+                    switchStaffTab('directory');
+                    
+                    // Auto-focus scanner on load
+                    setTimeout(() => document.getElementById('roster-scanner').focus(), 300);
+                } else {
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-unauthorized').classList.remove('hidden');
+                }
+            }
+        });
+
+        initAuth();
+
+        const loadData = () => {
+            // Listen to Personnel DB (Using 'personnel' to sync with Attendance & Canteen apps)
+            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'personnel');
+            onSnapshot(pRef, (snap) => {
+                personnelList = {};
+                snap.forEach(doc => personnelList[doc.id] = { id: doc.id, ...doc.data() });
+                window.renderStaffDirectory();
+            }, (err) => console.error("Personnel sync err:", err));
+        };
+
+        // ============================================================
+        //  SCANNING LOGIC (RAPID LOOKUP)
+        // ============================================================
+        
+        window.executeScan = async (val) => {
+            if (!val || !auth.currentUser) return;
+            if (isScanning) return; // Prevent rapid double scans
+            
+            isScanning = true;
+            showScanResultModal('SEARCHING...', 'Querying personnel database...', 'info');
+
+            try {
+                // Find user by empId or doc id
+                const emp = Object.values(personnelList).find(p => p.empId === val || p.id === val);
+                
+                if (emp) {
+                    playBeep('success');
+                    showScanResultModal('RECORD FOUND', `Loading profile for: ${emp.name}`, 'success');
+                    setTimeout(() => {
+                        editStaff(emp.id); // Open the edit tab
+                    }, 1000);
+                } else {
+                    playBeep('error');
+                    showScanResultModal('NOT FOUND', `New ID detected: ${val}`, 'error');
+                    // Automatically open creation tab and pre-fill the ID
+                    setTimeout(() => {
+                        switchStaffTab('create');
+                        document.getElementById('new-emp-id').value = val;
+                    }, 1000);
+                }
+            } catch (err) {
+                console.error("Lookup error:", err);
+                showScanResultModal('SYSTEM FAULT', 'Failed to query database.', 'error');
+            } finally {
+                // Cooldown
+                setTimeout(() => { isScanning = false; }, 1500);
+            }
+        };
+
+        // Hardware Scanner Handlers
+        window.handleScannerInput = (event) => {
+            if (event.key === 'Enter') {
+                if(scanDebounceTimer) clearTimeout(scanDebounceTimer);
+                executeScan(event.target.value.trim().toUpperCase());
+                event.target.value = ''; event.target.focus();
+            }
+        };
+        
+        window.handleAutoScan = (event) => {
+            if(scanDebounceTimer) clearTimeout(scanDebounceTimer);
+            scanDebounceTimer = setTimeout(() => {
+                const val = event.target.value.trim().toUpperCase();
+                if (val.length >= 2) { 
+                    executeScan(val);
+                    event.target.value = ''; event.target.focus();
+                }
+            }, 10);
+        };
+
+        window.keepFocus = (elementId) => {
+            setTimeout(() => {
+                const el = document.getElementById(elementId);
+                const isStaffView = !document.getElementById('view-staff').classList.contains('hidden');
+                
+                // Only refocus if the user isn't actively typing in another input/form field
+                const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+                const isInputFocused = ['input', 'textarea', 'select'].includes(activeTag);
+                
+                if (el && isStaffView && !isInputFocused) {
+                    el.focus();
+                }
+            }, 100);
+        };
+
+        // Webcam Handlers
+        window.startWebcamScanner = () => {
+            document.getElementById('webcam-modal').classList.remove('hidden');
+            if (!html5QrcodeScanner) html5QrcodeScanner = new Html5Qrcode("reader");
+            html5QrcodeScanner.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 250 } },
+                (decodedText) => { 
+                    stopWebcamScanner(); 
+                    executeScan(decodedText.trim().toUpperCase()); 
+                },
+                () => {}
+            ).catch(err => { 
+                showToast("Camera access restricted or unavailable", "error"); 
+                document.getElementById('webcam-modal').classList.add('hidden'); 
+            });
+        };
+        
+        window.stopWebcamScanner = () => {
+            document.getElementById('webcam-modal').classList.add('hidden');
+            if(html5QrcodeScanner) html5QrcodeScanner.stop().catch(()=>{});
+        };
+
+        // Quick Audio Feedback using AudioContext
+        function playBeep(type) {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                
+                if (type === 'success') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(800, ctx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1);
+                    gain.gain.setValueAtTime(1, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+                    osc.start(); osc.stop(ctx.currentTime + 0.3);
+                } else {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(200, ctx.currentTime);
+                    gain.gain.setValueAtTime(0.5, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+                    osc.start(); osc.stop(ctx.currentTime + 0.4);
+                }
+            } catch (e) { console.log("Audio not supported"); }
+        }
+
+        // ============================================================
+        //  ROSTER LOGIC
+        // ============================================================
+        window.switchStaffTab = (tab) => {
+            document.querySelectorAll('.staff-tab-content').forEach(el => el.classList.add('hidden'));
+            document.getElementById(`staff-tab-${tab}`).classList.remove('hidden');
+            
+            document.querySelectorAll('.staff-tab-btn').forEach(el => { 
+                el.classList.remove('bg-indigo-600', 'text-white', 'shadow-md'); 
+                el.classList.add('bg-white', 'dark:bg-slate-800', 'text-slate-600', 'dark:text-slate-300', 'shadow-sm'); 
+            });
+            document.getElementById(`staff-btn-${tab}`).classList.add('bg-indigo-600', 'text-white', 'shadow-md');
+            document.getElementById(`staff-btn-${tab}`).classList.remove('bg-white', 'dark:bg-slate-800', 'text-slate-600', 'dark:text-slate-300', 'shadow-sm');
+
+            if (tab === 'directory') window.renderStaffDirectory();
+            if (tab === 'create' && !isEditing) resetStaffForm(); 
+            
+            // Re-focus scanner if returning to directory
+            if (tab === 'directory') setTimeout(() => document.getElementById('roster-scanner').focus(), 100);
+        };
+
+        function resetStaffForm() {
+            document.getElementById('create-staff-form').reset();
+            const idField = document.getElementById('new-emp-id');
+            idField.readOnly = false;
+            idField.classList.remove('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
+            isEditing = false;
+            currentPhotoBase64 = null;
+            document.getElementById('emp-photo-preview').classList.add('hidden');
+            document.getElementById('emp-photo-preview').src = "";
+            document.getElementById('photo-upload-input').value = "";
+            
+            // Default Account requirement
+            document.getElementById('new-acct-name').value = 'CTE';
+            document.getElementById('new-status').value = 'ACTIVE';
+        }
+
+        window.handlePhotoUpload = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const MAX_WIDTH = 250; 
+                    const scaleSize = MAX_WIDTH / img.width;
+                    canvas.width = MAX_WIDTH;
+                    canvas.height = img.height * scaleSize;
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    currentPhotoBase64 = canvas.toDataURL('image/jpeg', 0.8);
+                    
+                    const preview = document.getElementById('emp-photo-preview');
+                    preview.src = currentPhotoBase64;
+                    preview.classList.remove('hidden');
+                };
+                img.src = ev.target.result;
+            };
+            reader.readAsDataURL(file);
+        };
+
+        window.renderStaffDirectory = () => {
+            const container = document.getElementById('staff-directory-list');
+            container.innerHTML = '';
+            
+            const searchInput = document.getElementById('staff-search-input');
+            const searchVal = searchInput ? searchInput.value.trim().toLowerCase() : '';
+            
+            let employees = Object.values(personnelList);
+            if (searchVal) {
+                employees = employees.filter(emp => {
+                    const id = emp.empId ? emp.empId.toLowerCase() : (emp.id ? emp.id.toLowerCase() : '');
+                    const name = emp.name ? emp.name.toLowerCase() : '';
+                    const dept = emp.department ? emp.department.toLowerCase() : (emp.dept ? emp.dept.toLowerCase() : '');
+                    
+                    return id.includes(searchVal) || name.includes(searchVal) || dept.includes(searchVal);
+                });
+            }
+
+            if (employees.length === 0) { 
+                container.innerHTML = '<tr><td colspan="6" class="px-6 py-12 text-center text-slate-500 dark:text-slate-400 font-medium"><i class="fas fa-users-slash text-3xl mb-3 opacity-50 block"></i> No personnel records found.</td></tr>'; 
+                return; 
+            }
+
+            employees.sort((a,b) => (a.name || '').localeCompare(b.name || ''));
+
+            employees.forEach(emp => {
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-slate-50 dark:hover:bg-slate-700/50 border-b border-slate-100 dark:border-slate-700/50 transition-colors';
+                
+                const photoHtml = emp.photoData 
+                    ? `<img src="${emp.photoData}" class="h-9 w-9 rounded-full object-cover border border-slate-200 dark:border-slate-600 inline-block mr-3 shadow-sm">`
+                    : `<div class="h-9 w-9 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 flex items-center justify-center text-xs inline-flex mr-3 shadow-sm font-bold">${(emp.name||'U').charAt(0)}</div>`;
+
+                const safeName = (emp.name || '').replace(/'/g, "\\'");
+                const safeAccount = (emp.accountName || '').replace(/'/g, "\\'");
+                const displayId = emp.empId || emp.id;
+                const statusBadge = emp.status === 'ACTIVE' ? '<span class="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded text-[10px] font-bold">ACTIVE</span>' : '<span class="text-red-500 bg-red-500/10 px-2 py-1 rounded text-[10px] font-bold">INACTIVE</span>';
+
+                tr.innerHTML = `
+                    <td class="px-6 py-4 text-sm font-bold text-slate-800 dark:text-white tracking-wide font-mono">${displayId}</td>
+                    <td class="px-6 py-4 text-sm flex items-center font-bold text-slate-700 dark:text-slate-200">${photoHtml} ${emp.name}</td>
+                    <td class="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">${emp.department || emp.dept || '-'}</td>
+                    <td class="px-6 py-4 text-sm text-slate-500 dark:text-slate-400">${emp.site || '-'}</td>
+                    <td class="px-6 py-4">${statusBadge}</td>
+                    <td class="px-6 py-4 text-sm text-right">
+                        <div class="flex justify-end space-x-2">
+                             <button onclick="showQrModal('${displayId}', '${safeName}', '${safeAccount}')" class="bg-slate-800 dark:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-900 dark:hover:bg-slate-500 hover:shadow-md transition" title="Print Security Badge"><i class="fas fa-id-badge"></i></button>
+                            <button onclick="editStaff('${displayId}')" class="bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 px-3 py-1.5 rounded-lg text-xs font-bold transition"><i class="fas fa-edit"></i></button>
+                            <button onclick="deleteStaff('${displayId}')" class="bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/50 px-3 py-1.5 rounded-lg text-xs font-bold transition"><i class="fas fa-trash"></i></button>
+                        </div>
+                    </td>
+                `;
+                container.appendChild(tr);
+            });
+        };
+
+        window.createStaffProfile = async () => {
+            const empId = document.getElementById('new-emp-id').value.trim().toUpperCase();
+            if (!empId) return showToast('ID required', 'error');
+            
+            // Map to standard personnel structure used in Attendance App
+            const staffData = {
+                empId: empId, // Support both empId and id for cross-compatibility
+                name: document.getElementById('new-emp-name').value.trim(),
+                department: document.getElementById('new-dept-name').value.trim(), // Use 'department' for attendance app sync
+                site: document.getElementById('new-site-name').value.trim(),
+                accountName: document.getElementById('new-acct-name').value.trim() || 'CTE',
+                companyName: document.getElementById('new-comp-name').value.trim(),
+                status: document.getElementById('new-status').value,
+                updatedAt: serverTimestamp()
+            };
+            
+            if (currentPhotoBase64) staffData.photoData = currentPhotoBase64;
+
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'personnel', empId), staffData, { merge: true });
+                window.showToast(isEditing ? 'Profile Updated' : 'Profile Created', 'success');
+                resetStaffForm();
+                switchStaffTab('directory');
+            } catch (err) {
+                console.error(err);
+                window.showToast('Failed to save record.', 'error');
+            }
+        };
+
+        window.editStaff = (id) => {
+            const emp = personnelList[id];
+            if (!emp) return;
+            document.getElementById('new-emp-id').value = emp.empId || emp.id;
+            document.getElementById('new-emp-name').value = emp.name || '';
+            document.getElementById('new-dept-name').value = emp.department || emp.dept || '';
+            document.getElementById('new-site-name').value = emp.site || '';
+            document.getElementById('new-acct-name').value = emp.accountName || 'CTE';
+            document.getElementById('new-comp-name').value = emp.companyName || '';
+            document.getElementById('new-status').value = emp.status || 'ACTIVE';
+            
+            const idField = document.getElementById('new-emp-id');
+            idField.readOnly = true;
+            idField.classList.add('bg-slate-100', 'dark:bg-slate-700', 'cursor-not-allowed');
+            
+            if (emp.photoData) {
+                currentPhotoBase64 = emp.photoData;
+                const preview = document.getElementById('emp-photo-preview');
+                preview.src = currentPhotoBase64;
+                preview.classList.remove('hidden');
+            } else {
+                currentPhotoBase64 = null;
+                document.getElementById('emp-photo-preview').classList.add('hidden');
+            }
+
+            isEditing = true;
+            switchStaffTab('create');
+        };
+
+        window.deleteStaff = async (id) => {
+            if(confirm(`Permanently delete record for ${id}?`)) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'personnel', id));
+                window.showToast('Record Deleted', 'success');
+            }
+        };
+
+        // QR Print Engine
+        window.showQrModal = (id, name, accountName) => {
+            const printOverlay = document.getElementById('print-overlay');
+            printOverlay.className = 'print-mode-single';
+            printOverlay.innerHTML = `
+                <div class="id-card-element bg-white border-2 border-gray-200 rounded-lg p-6 w-64 shadow-md text-center">
+                    <div class="border-b-2 border-gray-800 pb-2 mb-4">
+                        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Employee Identity</div>
+                        <div class="font-black text-gray-900 text-xl tracking-tight">CANTEEN PASS</div>
+                    </div>
+                    <div class="py-2">
+                        <div class="font-bold text-xl text-indigo-900 leading-tight mb-2 uppercase">${name}</div>
+                        <div class="text-sm font-bold text-gray-800 uppercase tracking-widest">${accountName || 'CTE'}</div>
+                    </div>
+                    <div class="flex justify-center my-4" id="single-qr-target"></div>
+                    <div class="border-t border-gray-200 pt-3 mt-4">
+                        <div class="text-[9px] text-gray-400 font-bold tracking-wider uppercase">Authorized Personnel Only</div>
+                        <div class="text-[10px] font-mono text-gray-500 mt-1">${id}</div>
+                    </div>
+                </div>
+            `;
+            
+            // Generate QR Code
+            new QRCode(document.getElementById('single-qr-target'), { text: id, width: 120, height: 120 });
+
+            // Trigger Browser Print Dialogue
+            setTimeout(() => window.print(), 500);
+        };
+    </script>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-sans min-h-screen flex flex-col transition-colors duration-500">
+
+    <!-- PRINT OVERLAY CONTAINER -->
+    <div id="print-overlay"></div>
+    <div id="toast-container" class="fixed bottom-6 right-6 z-[100] flex flex-col gap-2"></div>
+
+    <!-- Navigation -->
+    <nav class="bg-[#0B1120] text-white shadow-xl sticky top-0 z-40 border-b border-slate-800">
+        <div class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center gap-4">
+                <button onclick="goToDashboard()" class="hover:bg-slate-800 p-2 rounded-lg text-slate-300 transition-colors bg-slate-800/50">
+                    <i class="fas fa-arrow-left"></i>
+                </button>
+                <div class="bg-indigo-600 rounded-lg w-10 h-10 flex items-center justify-center shadow-[0_0_15px_rgba(79,70,229,0.4)]">
+                    <i class="fas fa-id-card text-white text-lg"></i>
+                </div>
+                <span class="font-extrabold text-2xl tracking-tight text-white hidden sm:block">Personnel<span class="text-indigo-400">Roster</span></span>
+            </div>
+            
+            <div class="flex items-center gap-4">
+                <div class="hidden md:block text-xs font-bold uppercase bg-slate-800 border border-slate-700 px-4 py-2.5 rounded-lg text-indigo-400 tracking-wider">
+                    <i class="fas fa-database mr-1 align-middle"></i> DB ONLINE
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-grow flex flex-col relative">
+        
+        <!-- LOADING VIEW -->
+        <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
+            <div class="relative flex items-center justify-center">
+                <div class="absolute animate-ping inline-flex h-20 w-20 rounded-full bg-indigo-500 opacity-20"></div>
+                <div class="relative inline-flex rounded-full h-10 w-10 bg-indigo-600 shadow-[0_0_30px_rgba(79,70,229,0.8)]"></div>
+            </div>
+            <div class="mt-8 text-center space-y-2">
+                <h2 class="text-white font-extrabold text-2xl tracking-tight">Syncing Roster...</h2>
+            </div>
+        </div>
+
+        <!-- UNAUTHORIZED VIEW -->
+        <div id="view-unauthorized" class="hidden absolute inset-0 z-[55] bg-[#0B1120] flex-col items-center justify-center text-center px-6 animate-fade-in">
+            <div class="bg-[#131B2B] p-10 rounded-[2rem] border border-slate-800 shadow-2xl max-w-md w-full relative overflow-hidden">
+                <div class="absolute -top-20 -right-20 w-40 h-40 bg-red-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                <i class="fas fa-shield-alt text-6xl text-red-500 mb-6 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]"></i>
+                <h2 class="text-2xl font-extrabold text-white mb-3">Access Denied</h2>
+                <p class="text-slate-400 text-sm mb-8 leading-relaxed font-medium">Valid session token missing. Please authenticate through the primary Enterprise Dashboard to access this terminal.</p>
+                <button onclick="goToDashboard()" class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3.5 rounded-xl border border-slate-700 transition-colors text-sm tracking-wider uppercase">
+                    Return to Dashboard
+                </button>
+            </div>
+        </div>
+
+        <!-- MAIN STAFF VIEW -->
+        <div id="view-staff" class="hidden container mx-auto px-6 py-8 animate-fade-in flex-grow flex flex-col">
+            <div class="mb-8">
+                <h2 class="text-3xl font-extrabold text-slate-800 dark:text-white tracking-tight flex items-center gap-3">
+                    Master Identity Database
+                </h2>
+                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">Manage workforce personnel, generate secure identity badges, and configure system clearance.</p>
+            </div>
+
+            <!-- RAPID SCANNER MODULE FOR LOOKUP -->
+            <div class="bg-white dark:bg-slate-800 rounded-[2rem] shadow-lg border border-slate-200 dark:border-slate-700 overflow-hidden mb-8">
+                <div class="bg-gradient-to-r from-indigo-600 to-indigo-700 p-4 text-center text-white relative overflow-hidden flex justify-between items-center">
+                    <h2 class="text-sm font-extrabold relative z-10 tracking-tight flex items-center"><i class="fas fa-search mr-3 opacity-70"></i> Rapid Personnel Lookup</h2>
+                    <button onclick="startWebcamScanner()" class="bg-indigo-800 hover:bg-indigo-900 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm border border-indigo-500/50 flex items-center"><i class="fas fa-camera mr-2"></i> Camera Scan</button>
+                </div>
+                <div class="p-5 flex flex-col items-center bg-slate-50 dark:bg-slate-900/50">
+                    <div class="w-full relative max-w-3xl">
+                        <div class="absolute inset-y-0 left-6 flex items-center pointer-events-none text-indigo-500 text-xl"><i class="fas fa-qrcode"></i></div>
+                        <input type="password" id="roster-scanner" inputmode="none" placeholder="SCAN ID TO OPEN PROFILE..." class="w-full pl-16 pr-6 py-4 border-2 border-slate-300 dark:border-slate-600 rounded-2xl bg-white dark:bg-slate-900 focus:bg-white dark:focus:bg-slate-800 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/20 font-mono text-center text-xl outline-none transition scanner-input shadow-inner text-slate-800 dark:text-white" onkeydown="handleScannerInput(event)" oninput="handleAutoScan(event)" onblur="keepFocus('roster-scanner')" autocomplete="off">
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex space-x-3 mb-6">
+                <button id="staff-btn-directory" onclick="switchStaffTab('directory')" class="staff-tab-btn px-6 py-3 bg-indigo-600 text-white border-none rounded-xl shadow-md text-sm font-bold transition-all">Personnel Database</button>
+                <button id="staff-btn-create" onclick="switchStaffTab('create')" class="staff-tab-btn px-6 py-3 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm text-sm font-bold transition-all hover:bg-slate-50 dark:hover:bg-slate-700">Add / Edit Record</button>
+            </div>
+            
+            <!-- Directory Tab -->
+            <div id="staff-tab-directory" class="staff-tab-content bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex-grow flex flex-col overflow-hidden">
+                <div class="p-6 border-b border-slate-100 dark:border-slate-700/50 bg-slate-50 dark:bg-slate-900/50">
+                    <div class="relative max-w-md">
+                        <span class="absolute inset-y-0 left-0 flex items-center pl-4 text-slate-400"><i class="fas fa-search"></i></span>
+                        <input type="text" id="staff-search-input" onkeyup="renderStaffDirectory()" placeholder="Search ID, Name, or Department..." class="w-full pl-11 pr-4 py-3 border border-slate-200 dark:border-slate-600 rounded-xl text-sm bg-white dark:bg-slate-800 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm font-medium">
+                    </div>
+                </div>
+                <div class="overflow-x-auto flex-grow">
+                    <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700/50">
+                        <thead class="bg-white dark:bg-slate-800 sticky top-0 shadow-sm">
+                            <tr>
+                                <th class="px-6 py-4 text-left text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">ID Array</th>
+                                <th class="px-6 py-4 text-left text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Identity Profile</th>
+                                <th class="px-6 py-4 text-left text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Department</th>
+                                <th class="px-6 py-4 text-left text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Designated Site</th>
+                                <th class="px-6 py-4 text-left text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Status</th>
+                                <th class="px-6 py-4 text-right text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Operations</th>
+                            </tr>
+                        </thead>
+                        <tbody id="staff-directory-list" class="bg-white dark:bg-slate-800 divide-y divide-slate-100 dark:divide-slate-700/50"></tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Create/Edit Tab -->
+            <div id="staff-tab-create" class="staff-tab-content hidden bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-8">
+                <form id="create-staff-form" class="grid grid-cols-1 md:grid-cols-2 gap-8" onsubmit="event.preventDefault(); createStaffProfile();">
+                    <div class="md:col-span-2 text-xl font-extrabold text-slate-800 dark:text-white pb-3 border-b border-slate-100 dark:border-slate-700/50 flex items-center"><i class="fas fa-id-card-alt text-indigo-500 mr-3"></i> Identity Enrollment Profile</div>
+                    
+                    <div class="md:col-span-2 bg-slate-50 dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">Biometric Photo Data</label>
+                            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Upload a facial image for visual clearance verification.</p>
+                            <input type="file" id="photo-upload-input" accept="image/*" class="text-sm file:mr-5 file:py-2.5 file:px-5 file:rounded-xl file:border-0 file:text-sm file:font-bold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 transition shadow-sm text-slate-600 dark:text-slate-300 cursor-pointer" onchange="handlePhotoUpload(event)">
+                        </div>
+                        <img id="emp-photo-preview" class="h-24 w-24 rounded-2xl object-cover hidden border-4 border-white dark:border-slate-600 shadow-lg bg-slate-200 dark:bg-slate-700" src="" alt="preview">
+                    </div>
+
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Employee ID (QRcode Sync)</label><input type="text" id="new-emp-id" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 uppercase font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm" required></div>
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Full Name</label><input type="text" id="new-emp-name" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm" required></div>
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Assigned Department</label><input type="text" id="new-dept-name" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm"></div>
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Facility / Site</label><input type="text" id="new-site-name" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm" placeholder="e.g. Wing B"></div>
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Manpower Company</label><input type="text" id="new-comp-name" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm"></div>
+                    <div><label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Cost Center / Account</label><input type="text" id="new-acct-name" class="w-full border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-slate-50 dark:bg-slate-800 font-bold text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm" value="CTE"></div>
+                    
+                    <div class="md:col-span-2">
+                        <label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">System Clearance Status</label>
+                        <select id="new-status" class="w-full md:w-1/2 border border-slate-200 dark:border-slate-600 rounded-xl px-4 py-3 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition shadow-sm font-bold">
+                            <option value="ACTIVE">ACTIVE - Cleared for Terminal Processing</option>
+                            <option value="INACTIVE">INACTIVE - Revoke Terminal Access</option>
+                        </select>
+                    </div>
+                    
+                    <div class="md:col-span-2 text-right border-t border-slate-100 dark:border-slate-700/50 pt-6 mt-4">
+                        <button type="submit" class="bg-indigo-600 text-white px-8 py-4 rounded-xl shadow-lg shadow-indigo-500/30 hover:bg-indigo-700 font-bold transition transform active:scale-95 text-sm uppercase tracking-wider">Commit Personnel Record</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </main>
+
+    <!-- VERIFICATION RESULT MODAL (FULL SCREEN FEEDBACK) -->
+    <div id="result-modal" class="fixed inset-0 hidden z-[70] flex items-end sm:items-center justify-center pointer-events-none p-4">
+        <div class="bg-slate-800 w-full max-w-sm rounded-3xl shadow-2xl pointer-events-auto transform transition-all scale-100 overflow-hidden border border-slate-700">
+            <div id="res-bg" class="rounded-t-3xl p-8 text-center flex flex-col items-center">
+                <i id="res-icon" class="text-6xl text-white mb-4 drop-shadow-md"></i>
+                <h2 id="res-title" class="text-2xl font-black text-white tracking-tight drop-shadow-sm"></h2>
+            </div>
+            <div class="p-8 text-center bg-slate-900/50">
+                <p id="res-msg" class="text-white font-bold text-xl leading-relaxed"></p>
+                <button onclick="document.getElementById('result-modal').classList.add('hidden')" class="mt-8 w-full py-3.5 bg-slate-800 border border-slate-600 hover:bg-slate-700 text-white font-bold rounded-xl transition shadow-sm text-sm uppercase tracking-wider">Acknowledge</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- WEBCAM MODAL -->
+    <div id="webcam-modal" class="fixed inset-0 bg-[#0B1120]/95 hidden z-[80] flex flex-col items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-[#131B2B] rounded-3xl overflow-hidden w-full max-w-md relative shadow-2xl border border-slate-800">
+            <div class="bg-[#1F2937] text-white p-5 flex justify-between items-center border-b border-slate-700">
+                <span class="font-bold flex items-center text-sm uppercase tracking-wider"><i class="fas fa-video mr-3 text-indigo-500"></i> Optical Feed Active</span>
+                <button onclick="stopWebcamScanner()" class="text-slate-400 hover:text-white bg-slate-800 hover:bg-red-500 rounded-lg p-2 transition"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="reader" class="w-full bg-[#0B1120] min-h-[350px]"></div>
+            <div class="p-5 text-center text-xs font-bold uppercase tracking-widest text-indigo-400 bg-[#1F2937] border-t border-slate-700">Awaiting QR / Barcode Interface...</div>
+        </div>
+    </div>
+
+</body>
+</html>
+
+```

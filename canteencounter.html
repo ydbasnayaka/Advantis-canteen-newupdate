@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Enterprise | Canteen Terminal</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: { slate: { 850: '#152033' } },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Google Fonts & FontAwesome -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- QR Code Libs -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .hide-scroll::-webkit-scrollbar { display: none; }
+        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .scanner-input { 
+            letter-spacing: 0.2em; 
+            font-weight: 800; 
+            caret-color: transparent; 
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .dark ::-webkit-scrollbar-thumb { background: #475569; }
+    </style>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, getDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Config
+        const appConfig = {
+            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+            messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+            appId: import.meta.env.VITE_FIREBASE_APP_ID
+        };
+
+        const app = initializeApp(appConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = (typeof __app_id !== 'undefined') ? __app_id : 'enterprise-dashboard-v1';
+
+        // State
+        let personnelMap = {};
+        let attendanceLogs = [];
+        let alcMealItems = {};
+        const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
+        let loggedInSysUser = null;
+        let isScanning = false;
+        
+        // Scanning Mode
+        let scanMode = 'STD'; // 'STD' or 'ALC'
+        
+        // Hardware & Webcam Scanner State
+        let html5QrcodeScanner = null;
+        let scanDebounceTimer = null;
+
+        document.documentElement.classList.add('dark');
+
+        window.showToast = (message, type = 'success') => {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const colors = type === 'success' ? 'bg-emerald-500 border-emerald-600' : type === 'error' ? 'bg-red-500 border-red-600' : 'bg-slate-700 border-slate-600';
+            const icon = type === 'success' ? 'fa-check-circle' : type === 'error' ? 'fa-exclamation-triangle' : 'fa-info-circle';
+            toast.className = `${colors} text-white px-4 py-3 rounded-xl shadow-lg border flex items-center gap-3 animate-fade-in text-sm font-bold mt-2`;
+            toast.innerHTML = `<i class="fas ${icon}"></i> <span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0'; toast.style.transform = 'translateY(10px)'; toast.style.transition = 'all 0.3s ease';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        };
+
+        // Enhanced UI Modal for scanning feedback with prominent Meal Name
+        window.showScanResultModal = (title, message, type, mealEmphasis = null) => {
+            const modal = document.getElementById('result-modal');
+            const iconEl = document.getElementById('res-icon');
+            const bgEl = document.getElementById('res-bg');
+            const emphasisEl = document.getElementById('res-emphasis');
+            
+            document.getElementById('res-title').textContent = title;
+            document.getElementById('res-msg').textContent = message;
+            
+            iconEl.classList.remove('hidden');
+            if (type === 'success') { iconEl.className = "fas fa-check-circle text-6xl text-white mb-4 drop-shadow-md"; }
+            else if (type === 'error') { iconEl.className = "fas fa-times-circle text-6xl text-white mb-4 drop-shadow-md"; }
+            else if (type === 'warning') { iconEl.className = "fas fa-exclamation-triangle text-6xl text-white mb-4 drop-shadow-md"; }
+            else { iconEl.className = "fas fa-spinner fa-spin text-6xl text-white mb-4 drop-shadow-md"; }
+            
+            if (mealEmphasis) {
+                emphasisEl.textContent = mealEmphasis;
+                emphasisEl.classList.remove('hidden');
+            } else {
+                emphasisEl.classList.add('hidden');
+            }
+            
+            modal.classList.remove('hidden');
+            if (type === 'success') { bgEl.className = `bg-gradient-to-br ${scanMode === 'ALC' ? 'from-indigo-500 to-indigo-600' : 'from-emerald-500 to-emerald-600'} rounded-t-2xl p-8 text-center relative overflow-hidden`; }
+            else if (type === 'error') { bgEl.className = "bg-gradient-to-br from-red-500 to-red-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            else if (type === 'warning') { bgEl.className = "bg-gradient-to-br from-amber-500 to-orange-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            else { bgEl.className = "bg-gradient-to-br from-blue-500 to-blue-600 rounded-t-2xl p-8 text-center relative overflow-hidden"; }
+            
+            if(title !== 'VERIFYING...') {
+                setTimeout(() => modal.classList.add('hidden'), 1800); // Slightly longer to read the meal name
+            }
+        };
+
+        function getTodayStr() { return new Date().toISOString().split('T')[0]; }
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) { console.error("Auth Error:", err); }
+        };
+
+        window.goToDashboard = () => {
+            try {
+                if (window.location.protocol === 'blob:') window.history.back();
+                else window.location.href = 'index.html';
+            } catch (e) { window.history.back(); }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                const sessionStr = localStorage.getItem(SYS_SESSION_KEY);
+                if (sessionStr) {
+                    const session = JSON.parse(sessionStr);
+                    loggedInSysUser = { username: session.username };
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-canteen').classList.remove('hidden');
+                    loadData();
+                    
+                    setTimeout(() => document.getElementById('canteen-scanner').focus(), 300);
+                } else {
+                    document.getElementById('view-loading').classList.add('hidden');
+                    document.getElementById('view-unauthorized').classList.remove('hidden');
+                }
+            }
+        });
+
+        initAuth();
+
+        const loadData = () => {
+            // Load ALC Settings from Planner Module
+            const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_settings', 'canteen');
+            onSnapshot(settingsRef, (docSnap) => {
+                if (docSnap.exists() && docSnap.data().alcMealItems) {
+                    alcMealItems = docSnap.data().alcMealItems;
+                    updateAlcDropdown();
+                    updateStatsUI();
+                }
+            });
+
+            // Load Personnel Database
+            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'personnel');
+            onSnapshot(pRef, (snap) => {
+                personnelMap = {};
+                snap.forEach(doc => personnelMap[doc.id] = doc.data());
+                updateStatsUI();
+            });
+
+            // Listen to Attendance Logs for Today (Security Check-ins & Redemptions)
+            const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'attendance_logs');
+            onSnapshot(aRef, (snap) => {
+                const today = getTodayStr();
+                attendanceLogs = [];
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date === today) attendanceLogs.push({ id: doc.id, ...data });
+                });
+                
+                attendanceLogs.sort((a, b) => {
+                    const tA = a.redeemedAt?.toMillis ? a.redeemedAt.toMillis() : 0;
+                    const tB = b.redeemedAt?.toMillis ? b.redeemedAt.toMillis() : 0;
+                    return tB - tA; 
+                });
+                
+                updateStatsUI();
+                renderRecentScans();
+            });
+        };
+
+        // --- UI UPDATES ---
+        
+        function updateAlcDropdown() {
+            const select = document.getElementById('alc-meal-select');
+            select.innerHTML = '<option value="" disabled selected>-- Select ALC Meal Variety --</option>';
+            
+            Object.entries(alcMealItems).sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, cost]) => {
+                select.innerHTML += `<option value="${name}">${name} (LKR ${cost.toFixed(2)})</option>`;
+            });
+        }
+
+        window.switchScanMode = (mode) => {
+            scanMode = mode;
+            
+            const btnStd = document.getElementById('btn-mode-std');
+            const btnAlc = document.getElementById('btn-mode-alc');
+            const dropdownContainer = document.getElementById('alc-dropdown-container');
+            const header = document.getElementById('scanner-header');
+            const title = document.getElementById('scanner-title');
+            const icon = document.getElementById('scanner-input-icon');
+            const input = document.getElementById('canteen-scanner');
+
+            if (mode === 'STD') {
+                btnStd.className = "flex-1 py-3 bg-emerald-600 text-white rounded-xl shadow-md text-sm font-bold transition-all";
+                btnAlc.className = "flex-1 py-3 bg-slate-800 text-slate-300 hover:bg-slate-700 rounded-xl text-sm font-bold transition-all";
+                
+                dropdownContainer.classList.add('hidden');
+                header.className = "bg-gradient-to-r from-emerald-600 to-emerald-700 p-5 text-center text-white relative overflow-hidden flex justify-between items-center transition-colors";
+                title.innerHTML = '<i class="fas fa-barcode mr-3 opacity-70"></i> Standard POS Fulfillment';
+                
+                input.className = "w-full pl-16 pr-6 py-5 border-2 border-slate-600 rounded-2xl bg-slate-900 focus:bg-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 font-mono text-center text-2xl outline-none transition scanner-input shadow-inner text-white";
+                icon.className = "absolute inset-y-0 left-6 flex items-center pointer-events-none text-emerald-400 text-xl transition-colors";
+            } else {
+                btnAlc.className = "flex-1 py-3 bg-indigo-600 text-white rounded-xl shadow-md text-sm font-bold transition-all";
+                btnStd.className = "flex-1 py-3 bg-slate-800 text-slate-300 hover:bg-slate-700 rounded-xl text-sm font-bold transition-all";
+                
+                dropdownContainer.classList.remove('hidden');
+                header.className = "bg-gradient-to-r from-indigo-600 to-indigo-700 p-5 text-center text-white relative overflow-hidden flex justify-between items-center transition-colors";
+                title.innerHTML = '<i class="fas fa-fish mr-3 opacity-70"></i> ALC Variety POS';
+                
+                input.className = "w-full pl-16 pr-6 py-5 border-2 border-slate-600 rounded-2xl bg-slate-900 focus:bg-slate-800 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/20 font-mono text-center text-2xl outline-none transition scanner-input shadow-inner text-white";
+                icon.className = "absolute inset-y-0 left-6 flex items-center pointer-events-none text-indigo-400 text-xl transition-colors";
+            }
+
+            updateStatsUI(); // Refresh dashboards
+            setTimeout(() => input.focus(), 100);
+        };
+
+        function updateStatsUI() {
+            let stdIssued = 0, stdRedeemed = 0;
+            let alcIssued = 0, alcRedeemed = 0;
+            let alcMealCounts = {};
+
+            // Calculate aggregations
+            attendanceLogs.forEach(log => {
+                const emp = personnelMap[log.empId] || Object.values(personnelMap).find(p => p.empId === log.empId) || {};
+                const company = (emp.companyName || emp.company || '').toUpperCase();
+                const isAlcEmp = company.includes('ALC');
+
+                if (isAlcEmp) {
+                    alcIssued++;
+                    if (log.mealRedeemed) {
+                        alcRedeemed++;
+                        if (log.mealName) {
+                            alcMealCounts[log.mealName] = (alcMealCounts[log.mealName] || 0) + 1;
+                        }
+                    }
+                } else {
+                    stdIssued++;
+                    if (log.mealRedeemed) {
+                        stdRedeemed++;
+                    }
+                }
+            });
+
+            // Update UI based on active tab
+            if (scanMode === 'STD') {
+                document.getElementById('dash-std').classList.remove('hidden');
+                document.getElementById('dash-alc').classList.add('hidden');
+                
+                document.getElementById('stat-std-issued').innerText = stdIssued;
+                document.getElementById('stat-std-redeemed').innerText = stdRedeemed;
+                const pBar = document.getElementById('std-progress');
+                const pText = document.getElementById('std-progress-text');
+                const percent = stdIssued === 0 ? 0 : Math.round((stdRedeemed / stdIssued) * 100);
+                pBar.style.width = `${percent}%`;
+                pText.innerText = `${percent}% Fulfilled`;
+            } else {
+                document.getElementById('dash-std').classList.add('hidden');
+                document.getElementById('dash-alc').classList.remove('hidden');
+                
+                document.getElementById('stat-alc-issued').innerText = alcIssued;
+                document.getElementById('stat-alc-redeemed').innerText = alcRedeemed;
+                const pBar = document.getElementById('alc-progress');
+                const pText = document.getElementById('alc-progress-text');
+                const percent = alcIssued === 0 ? 0 : Math.round((alcRedeemed / alcIssued) * 100);
+                pBar.style.width = `${percent}%`;
+                pText.innerText = `${percent}% Fulfilled`;
+
+                // Render ALC Variety Breakdown
+                const breakdownEl = document.getElementById('alc-variety-breakdown');
+                breakdownEl.innerHTML = '';
+                if (Object.keys(alcMealCounts).length === 0) {
+                    breakdownEl.innerHTML = '<div class="text-xs text-slate-500 italic mt-2">No ALC varieties redeemed yet today.</div>';
+                } else {
+                    Object.entries(alcMealCounts).sort((a,b)=>b[1]-a[1]).forEach(([meal, count]) => {
+                        breakdownEl.innerHTML += `
+                            <div class="flex justify-between items-center bg-slate-100 dark:bg-slate-700/30 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700/50 mb-2">
+                                <span class="text-sm font-bold text-slate-700 dark:text-slate-300">${meal}</span>
+                                <span class="text-sm font-black text-indigo-500">${count} <span class="text-[10px] text-slate-400 font-normal uppercase">Served</span></span>
+                            </div>
+                        `;
+                    });
+                }
+            }
+        }
+
+        function renderRecentScans() {
+            const listEl = document.getElementById('recent-scans');
+            const redeemedLogs = attendanceLogs.filter(log => log.mealRedeemed === true).slice(0, 8);
+            
+            if (redeemedLogs.length === 0) {
+                listEl.innerHTML = `<div class="text-center py-8 text-slate-500"><i class="fas fa-history mb-2 opacity-50 text-2xl"></i><p class="text-xs font-bold uppercase tracking-wider">No Redemptions Yet</p></div>`;
+                return;
+            }
+
+            let html = '';
+            redeemedLogs.forEach(log => {
+                const emp = personnelMap[log.empId] || Object.values(personnelMap).find(p => p.empId === log.empId) || {};
+                const empName = emp.name || 'Unknown Employee';
+                const isAlcLog = log.mealName !== undefined;
+                const timeStr = log.redeemedAt?.toDate ? log.redeemedAt.toDate().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : 'Just now';
+
+                html += `
+                    <div class="flex justify-between items-center p-3 rounded-xl bg-slate-100 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600 animate-fade-in mb-2">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 rounded-full ${isAlcLog ? 'bg-indigo-500/20 text-indigo-400' : 'bg-emerald-500/20 text-emerald-400'} flex items-center justify-center text-sm"><i class="fas ${isAlcLog ? 'fa-fish' : 'fa-utensils'}"></i></div>
+                            <div>
+                                <h4 class="font-bold text-sm text-slate-800 dark:text-white leading-none mb-1">${empName}</h4>
+                                <div class="flex items-center gap-2">
+                                    <span class="text-[9px] text-slate-500 font-mono"><i class="far fa-clock"></i> ${timeStr}</span>
+                                    ${isAlcLog 
+                                        ? `<span class="text-[9px] uppercase font-bold text-indigo-400 tracking-wider">• ${log.mealName}</span>` 
+                                        : `<span class="text-[9px] uppercase font-bold text-emerald-500 tracking-wider">• Standard</span>`
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            listEl.innerHTML = html;
+        }
+
+        // --- SCANNING & REDEMPTION LOGIC ---
+        
+        async function processRedemption(scannedVal) {
+            if (!scannedVal || !auth.currentUser) return;
+            if (isScanning) return; 
+            
+            isScanning = true;
+            showScanResultModal('VERIFYING...', 'Processing ID...', 'info');
+
+            // Find personnel ID dynamically
+            const emp = personnelMap[scannedVal] || Object.values(personnelMap).find(p => p.empId === scannedVal);
+            if (!emp) {
+                playBeep('error');
+                isScanning = false;
+                return showScanResultModal('NOT FOUND', 'ID does not exist in Personnel Database.', 'error');
+            }
+
+            const empId = emp.empId || emp.id; 
+            const company = (emp.companyName || emp.company || '').toUpperCase();
+            const isAlcEmp = company.includes('ALC');
+
+            // --- STRICT ACCOUNTING VALIDATION ---
+            if (scanMode === 'ALC' && !isAlcEmp) {
+                playBeep('error');
+                isScanning = false;
+                return showScanResultModal('MODE CONFLICT', 'Standard personnel cannot redeem ALC varieties. Switch to Standard POS.', 'warning');
+            }
+
+            if (scanMode === 'STD' && isAlcEmp) {
+                playBeep('error');
+                isScanning = false;
+                return showScanResultModal('MODE CONFLICT', 'ALC personnel must have specific meal varieties selected. Switch to ALC POS.', 'warning');
+            }
+
+            // ALC Meal Selection Check
+            let selectedMealName = null;
+            let appliedCost = 0;
+            if (scanMode === 'ALC') {
+                selectedMealName = document.getElementById('alc-meal-select').value;
+                if (!selectedMealName) {
+                    playBeep('error');
+                    isScanning = false;
+                    return showScanResultModal('MISSING SELECTION', 'Please select an ALC Meal Variety before scanning.', 'warning');
+                }
+                appliedCost = alcMealItems[selectedMealName] || 0;
+            }
+
+            // Execute Transaction
+            const today = getTodayStr();
+            const docId = `${today}_${empId}`;
+            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'attendance_logs', docId);
+
+            try {
+                const snapshot = await getDoc(ref);
+                
+                if (!snapshot.exists()) {
+                    playBeep('error');
+                    showScanResultModal('ACCESS DENIED', 'Employee has NOT checked in at the Security Counter today.', 'error');
+                } else {
+                    const data = snapshot.data();
+                    
+                    if (data.mealRedeemed === true) {
+                        playBeep('error');
+                        showScanResultModal('ALREADY REDEEMED', 'Meal token already fulfilled for today.', 'warning');
+                    } else {
+                        // Success path
+                        const updatePayload = {
+                            mealRedeemed: true,
+                            redeemedAt: serverTimestamp(),
+                            redeemedBy: loggedInSysUser?.username || 'SYSTEM'
+                        };
+
+                        // Append specific meal accounting data if ALC
+                        if (scanMode === 'ALC') {
+                            updatePayload.mealName = selectedMealName;
+                            updatePayload.costApplied = appliedCost;
+                        }
+
+                        await updateDoc(ref, updatePayload);
+                        
+                        playBeep('success');
+                        
+                        // Show massive notification so canteen staff knows what to serve
+                        const highlightMeal = scanMode === 'ALC' ? selectedMealName : 'STANDARD MEAL';
+                        showScanResultModal('MEAL APPROVED', `Clear to serve: ${emp.name}`, 'success', highlightMeal);
+                    }
+                }
+            } catch (err) {
+                console.error("Redemption error:", err);
+                showScanResultModal('SYSTEM FAULT', 'Failed to record entry.', 'error');
+            } finally {
+                setTimeout(() => { isScanning = false; }, 1500);
+            }
+        }
+
+        // Hardware Scanner Handlers
+        window.handleScannerInput = (event) => {
+            if (event.key === 'Enter') {
+                if(scanDebounceTimer) clearTimeout(scanDebounceTimer);
+                processRedemption(event.target.value.trim().toUpperCase());
+                event.target.value = ''; event.target.focus();
+            }
+        };
+        
+        window.handleAutoScan = (event) => {
+            if(scanDebounceTimer) clearTimeout(scanDebounceTimer);
+            scanDebounceTimer = setTimeout(() => {
+                const val = event.target.value.trim().toUpperCase();
+                if (val.length >= 2) { 
+                    processRedemption(val);
+                    event.target.value = ''; event.target.focus();
+                }
+            }, 10);
+        };
+
+        window.keepFocus = (elementId) => {
+            setTimeout(() => {
+                const el = document.getElementById(elementId);
+                const isCanteenView = !document.getElementById('view-canteen').classList.contains('hidden');
+                
+                const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+                const isDropdownFocused = activeTag === 'select';
+
+                // Prevent stealing focus if they are actively using the dropdown
+                if (el && document.activeElement !== el && isCanteenView && !isDropdownFocused) {
+                    el.focus();
+                }
+            }, 100);
+        };
+
+        // Webcam Handlers
+        window.startWebcamScanner = () => {
+            document.getElementById('webcam-modal').classList.remove('hidden');
+            if (!html5QrcodeScanner) html5QrcodeScanner = new Html5Qrcode("reader");
+            html5QrcodeScanner.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 250, height: 250 } },
+                (decodedText) => { 
+                    stopWebcamScanner(); 
+                    processRedemption(decodedText.trim().toUpperCase()); 
+                },
+                () => {}
+            ).catch(err => { 
+                showToast("Camera access restricted or unavailable", "error"); 
+                document.getElementById('webcam-modal').classList.add('hidden'); 
+            });
+        };
+        
+        window.stopWebcamScanner = () => {
+            document.getElementById('webcam-modal').classList.add('hidden');
+            if(html5QrcodeScanner) html5QrcodeScanner.stop().catch(()=>{});
+        };
+
+        // Quick Audio Feedback using AudioContext
+        function playBeep(type) {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                
+                if (type === 'success') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(800, ctx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1);
+                    gain.gain.setValueAtTime(1, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+                    osc.start(); osc.stop(ctx.currentTime + 0.3);
+                } else {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(200, ctx.currentTime);
+                    gain.gain.setValueAtTime(0.5, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+                    osc.start(); osc.stop(ctx.currentTime + 0.4);
+                }
+            } catch (e) { console.log("Audio not supported"); }
+        }
+    </script>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen flex flex-col transition-colors duration-500">
+
+    <div id="toast-container" class="fixed bottom-6 right-6 z-[100] flex flex-col gap-2"></div>
+
+    <!-- Navigation -->
+    <nav class="bg-[#0B1120] text-white shadow-xl sticky top-0 z-40 border-b border-slate-800">
+        <div class="container mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center gap-4">
+                <button onclick="goToDashboard()" class="hover:bg-slate-800 p-2 rounded-lg text-slate-300 transition-colors bg-slate-800/50">
+                    <i class="fas fa-arrow-left"></i>
+                </button>
+                <div class="bg-emerald-600 rounded-lg w-10 h-10 flex items-center justify-center shadow-[0_0_15px_rgba(16,185,129,0.4)]" id="nav-icon-bg">
+                    <i class="fas fa-utensils text-white text-lg"></i>
+                </div>
+                <span class="font-extrabold text-2xl tracking-tight text-white hidden sm:block">Canteen<span class="text-emerald-500" id="nav-title-span">Counter</span></span>
+            </div>
+            
+            <div class="flex items-center gap-4">
+                <div class="hidden md:block text-xs font-bold uppercase bg-slate-800 border border-slate-700 px-4 py-2.5 rounded-lg text-emerald-400 tracking-wider">
+                    <i class="fas fa-wifi mr-1 align-middle"></i> ONLINE
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="flex-grow flex flex-col relative">
+        
+        <!-- LOADING VIEW -->
+        <div id="view-loading" class="fixed inset-0 z-[60] bg-[#0B1120] flex flex-col items-center justify-center transition-opacity duration-500">
+            <div class="relative flex items-center justify-center">
+                <div class="absolute animate-ping inline-flex h-20 w-20 rounded-full bg-emerald-500 opacity-20"></div>
+                <div class="relative inline-flex rounded-full h-10 w-10 bg-emerald-600 shadow-[0_0_30px_rgba(16,185,129,0.8)]"></div>
+            </div>
+            <div class="mt-8 text-center space-y-2">
+                <h2 class="text-white font-extrabold text-2xl tracking-tight">Authorizing Module...</h2>
+            </div>
+        </div>
+
+        <!-- UNAUTHORIZED VIEW -->
+        <div id="view-unauthorized" class="hidden absolute inset-0 z-[55] bg-[#0B1120] flex-col items-center justify-center text-center px-6 animate-fade-in">
+            <div class="bg-[#131B2B] p-10 rounded-[2rem] border border-slate-800 shadow-2xl max-w-md w-full relative overflow-hidden">
+                <div class="absolute -top-20 -right-20 w-40 h-40 bg-red-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                <i class="fas fa-shield-alt text-6xl text-red-500 mb-6 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]"></i>
+                <h2 class="text-2xl font-extrabold text-white mb-3">Access Denied</h2>
+                <p class="text-slate-400 text-sm mb-8 leading-relaxed font-medium">Valid session token missing. Please authenticate through the primary Enterprise Dashboard to access this terminal.</p>
+                <button onclick="goToDashboard()" class="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3.5 rounded-xl border border-slate-700 transition-colors text-sm tracking-wider uppercase">
+                    Return to Dashboard
+                </button>
+            </div>
+        </div>
+
+        <!-- MAIN CANTEEN VIEW -->
+        <div id="view-canteen" class="hidden container mx-auto px-6 py-8 animate-fade-in flex-grow flex flex-col">
+            <div class="mb-8">
+                <h2 class="text-3xl font-extrabold text-slate-800 dark:text-white tracking-tight flex items-center gap-3">
+                    Redemption Node
+                </h2>
+                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">Select POS mode to authorize and fulfill daily meal allocations.</p>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 flex-grow">
+                
+                <!-- Left: Scanner Area -->
+                <div class="lg:col-span-2 flex flex-col gap-6">
+                    
+                    <!-- TABBED SCANNER MODULE -->
+                    <div class="bg-slate-800 rounded-3xl shadow-lg border border-slate-700 overflow-hidden mb-8">
+                        
+                        <!-- Tabs -->
+                        <div class="flex p-2 bg-slate-900 border-b border-slate-700">
+                            <button id="btn-mode-std" onclick="switchScanMode('STD')" class="flex-1 py-3 bg-emerald-600 text-white rounded-xl shadow-md text-sm font-bold transition-all"><i class="fas fa-barcode mr-2"></i> Standard POS</button>
+                            <button id="btn-mode-alc" onclick="switchScanMode('ALC')" class="flex-1 py-3 bg-slate-800 text-slate-300 hover:bg-slate-700 rounded-xl text-sm font-bold transition-all"><i class="fas fa-fish mr-2"></i> ALC Variety POS</button>
+                        </div>
+
+                        <!-- Scanner Header -->
+                        <div id="scanner-header" class="bg-gradient-to-r from-emerald-600 to-emerald-700 p-5 text-center text-white relative overflow-hidden flex justify-between items-center transition-colors duration-300">
+                            <h2 id="scanner-title" class="text-lg font-extrabold relative z-10 tracking-tight flex items-center"><i class="fas fa-barcode mr-3 opacity-70"></i> Standard POS Fulfillment</h2>
+                            <button onclick="startWebcamScanner()" class="bg-white/10 hover:bg-white/20 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm border border-white/20 flex items-center"><i class="fas fa-camera mr-2"></i> Optical Scan</button>
+                        </div>
+                        
+                        <div class="p-6 flex flex-col items-center bg-slate-900/50">
+                            
+                            <!-- ALC Meal Selector (Hidden by Default) -->
+                            <div id="alc-dropdown-container" class="w-full max-w-2xl mb-5 hidden animate-fade-in">
+                                <label class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest block mb-2"><i class="fas fa-concierge-bell mr-1"></i> Confirm Specific Meal Item to Issue</label>
+                                <div class="relative">
+                                    <select id="alc-meal-select" class="w-full border-2 border-indigo-500/50 rounded-xl px-4 py-4 bg-slate-800 text-white focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition shadow-sm font-bold appearance-none cursor-pointer" onchange="keepFocus('canteen-scanner')">
+                                        <option value="" disabled selected>-- Select ALC Meal Variety --</option>
+                                        <!-- Loaded via JS -->
+                                    </select>
+                                    <div class="absolute right-5 top-5 pointer-events-none text-indigo-400"><i class="fas fa-chevron-down"></i></div>
+                                </div>
+                            </div>
+
+                            <div class="w-full relative max-w-2xl">
+                                <div id="scanner-input-icon" class="absolute inset-y-0 left-6 flex items-center pointer-events-none text-emerald-400 text-xl transition-colors"><i class="fas fa-qrcode"></i></div>
+                                <input type="password" id="canteen-scanner" inputmode="none" placeholder="SCAN PERSONNEL QR..." class="w-full pl-16 pr-6 py-5 border-2 border-slate-600 rounded-2xl bg-slate-900 focus:bg-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/20 font-mono text-center text-2xl outline-none transition scanner-input shadow-inner text-white" onkeydown="handleScannerInput(event)" oninput="handleAutoScan(event)" onblur="keepFocus('canteen-scanner')" autocomplete="off">
+                            </div>
+                        </div>
+                    </div>
+                    
+                </div>
+
+                <!-- Right: Stats & Dashboards -->
+                <div class="flex flex-col gap-6">
+                    
+                    <!-- DASHBOARD: STANDARD -->
+                    <div id="dash-std" class="flex flex-col gap-6 animate-fade-in">
+                        <div class="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-emerald-200 dark:border-emerald-900/40 shadow-sm relative overflow-hidden">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500/10 rounded-full pointer-events-none"></div>
+                            <span class="text-emerald-600 dark:text-emerald-400 text-[10px] font-bold uppercase tracking-[0.15em] mb-1 block">Standard Personnel Checked-in Today</span>
+                            <div class="flex items-end gap-3 mt-2">
+                                <span id="stat-std-issued" class="text-4xl font-black text-slate-800 dark:text-white leading-none">0</span>
+                                <span class="text-slate-400 text-sm font-medium mb-1">waiting</span>
+                            </div>
+                        </div>
+
+                        <div class="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-700 shadow-sm">
+                            <span class="text-slate-400 text-[10px] font-bold uppercase tracking-[0.15em] mb-1 block">Standard Meals Redeemed</span>
+                            <div class="flex items-end gap-3 mt-2">
+                                <span id="stat-std-redeemed" class="text-4xl font-black text-emerald-500 leading-none">0</span>
+                                <span class="text-slate-400 text-sm font-medium mb-1">served</span>
+                            </div>
+                            
+                            <div class="mt-6">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-slate-400 text-[10px] font-bold uppercase tracking-[0.1em]">Fulfillment Rate</span>
+                                    <span id="std-progress-text" class="text-xs font-black text-slate-800 dark:text-white">0%</span>
+                                </div>
+                                <div class="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-2 overflow-hidden border border-slate-200 dark:border-slate-600">
+                                    <div id="std-progress" class="bg-emerald-500 h-full rounded-full transition-all duration-1000 ease-out" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- DASHBOARD: ALC -->
+                    <div id="dash-alc" class="hidden flex flex-col gap-6 animate-fade-in">
+                        <div class="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-indigo-200 dark:border-indigo-900/40 shadow-sm relative overflow-hidden">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-indigo-500/10 rounded-full pointer-events-none"></div>
+                            <span class="text-indigo-600 dark:text-indigo-400 text-[10px] font-bold uppercase tracking-[0.15em] mb-1 block">ALC Personnel Checked-in Today</span>
+                            <div class="flex items-end gap-3 mt-2">
+                                <span id="stat-alc-issued" class="text-4xl font-black text-slate-800 dark:text-white leading-none">0</span>
+                                <span class="text-slate-400 text-sm font-medium mb-1">waiting</span>
+                            </div>
+                        </div>
+
+                        <div class="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-700 shadow-sm">
+                            <div class="flex justify-between items-start mb-4">
+                                <div>
+                                    <span class="text-slate-400 text-[10px] font-bold uppercase tracking-[0.15em] mb-1 block">ALC Meals Redeemed</span>
+                                    <div class="flex items-end gap-3">
+                                        <span id="stat-alc-redeemed" class="text-4xl font-black text-indigo-500 leading-none">0</span>
+                                        <span class="text-slate-400 text-sm font-medium mb-1">served</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-4 mb-6">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-slate-400 text-[10px] font-bold uppercase tracking-[0.1em]">Fulfillment Rate</span>
+                                    <span id="alc-progress-text" class="text-xs font-black text-slate-800 dark:text-white">0%</span>
+                                </div>
+                                <div class="w-full bg-slate-100 dark:bg-slate-700 rounded-full h-2 overflow-hidden border border-slate-200 dark:border-slate-600">
+                                    <div id="alc-progress" class="bg-indigo-500 h-full rounded-full transition-all duration-1000 ease-out" style="width: 0%"></div>
+                                </div>
+                            </div>
+
+                            <div class="border-t border-slate-200 dark:border-slate-700 pt-4">
+                                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-[0.15em] mb-3 block"><i class="fas fa-list-ul mr-1"></i> Live Variety Breakdown</span>
+                                <div id="alc-variety-breakdown" class="flex flex-col gap-1 max-h-32 overflow-y-auto hide-scroll">
+                                    <!-- Rendered via JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Recent Logs (Global) -->
+                    <div class="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-700 shadow-sm flex-grow flex flex-col min-h-[250px]">
+                        <h3 class="text-sm font-bold text-slate-800 dark:text-white uppercase tracking-wider mb-4 border-b border-slate-200 dark:border-slate-700 pb-3"><i class="fas fa-history text-slate-400 mr-2"></i> Unified Activity Log</h3>
+                        <div id="recent-scans" class="flex-grow space-y-1 overflow-y-auto hide-scroll">
+                            <!-- Populated via JS -->
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- VERIFICATION RESULT MODAL (FULL SCREEN FEEDBACK) -->
+    <div id="result-modal" class="fixed inset-0 hidden z-[70] flex items-end sm:items-center justify-center pointer-events-none p-4">
+        <div class="bg-slate-800 w-full max-w-md rounded-3xl shadow-2xl pointer-events-auto transform transition-all scale-100 overflow-hidden border border-slate-700">
+            <div id="res-bg" class="rounded-t-3xl p-8 text-center flex flex-col items-center">
+                <i id="res-icon" class="text-6xl text-white mb-4 drop-shadow-md"></i>
+                <h2 id="res-title" class="text-2xl font-black text-white tracking-tight drop-shadow-sm"></h2>
+                
+                <!-- NEW: Prominent Meal Name Emphasis -->
+                <div id="res-emphasis" class="w-full mt-4 bg-white/20 backdrop-blur-md rounded-xl py-4 border border-white/30 hidden">
+                    <span class="block text-[10px] font-bold text-white/70 uppercase tracking-widest mb-1">Kitchen Instruction</span>
+                    <span class="block text-3xl font-black text-white uppercase tracking-tight drop-shadow-md">FISH MEAL</span>
+                </div>
+            </div>
+            
+            <div class="p-8 text-center bg-slate-900/50">
+                <p id="res-msg" class="text-white font-bold text-xl leading-relaxed"></p>
+                <button onclick="document.getElementById('result-modal').classList.add('hidden')" class="mt-8 w-full py-3.5 bg-slate-800 border border-slate-600 hover:bg-slate-700 text-white font-bold rounded-xl transition shadow-sm text-sm uppercase tracking-wider">Acknowledge</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- WEBCAM MODAL -->
+    <div id="webcam-modal" class="fixed inset-0 bg-[#0B1120]/95 hidden z-[80] flex flex-col items-center justify-center p-4 backdrop-blur-sm">
+        <div class="bg-[#131B2B] rounded-3xl overflow-hidden w-full max-w-md relative shadow-2xl border border-slate-800">
+            <div class="bg-[#1F2937] text-white p-5 flex justify-between items-center border-b border-slate-700">
+                <span class="font-bold flex items-center text-sm uppercase tracking-wider"><i class="fas fa-video mr-3 text-blue-500"></i> Optical Feed Active</span>
+                <button onclick="stopWebcamScanner()" class="text-slate-400 hover:text-white bg-slate-800 hover:bg-red-500 rounded-lg p-2 transition"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="reader" class="w-full bg-[#0B1120] min-h-[350px]"></div>
+            <div class="p-5 text-center text-xs font-bold uppercase tracking-widest text-blue-400 bg-[#1F2937] border-t border-slate-700">Awaiting QR / Barcode Interface...</div>
+        </div>
+    </div>
+
+</body>
+</html>
+
+
+```
