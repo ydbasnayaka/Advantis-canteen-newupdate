@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Enterprise | Attendance Terminal</title>
+    <title>Security | Attendance Check-in</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -56,27 +56,36 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Firebase Config
-        const appConfig = {
-            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-            messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-            appId: import.meta.env.VITE_FIREBASE_APP_ID
-        };
+        let firebaseConfig = {};
+        try { firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {}; } catch(e) {}
+        
+        if (!firebaseConfig.apiKey) {
+            firebaseConfig = {
+                apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || "",
+                authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN || "",
+                projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID || "",
+                storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET || "",
+                messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
+                appId: import.meta.env?.VITE_FIREBASE_APP_ID || ""
+            };
+        }
 
-        const app = initializeApp(appConfig);
+        const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = (typeof __app_id !== 'undefined') ? __app_id : 'enterprise-dashboard-v1';
+        
+        // Exact database tree path mapping
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'canteen-os-live';
 
         // State
-        let personnelList = [];
-        let attendanceLogs = [];
+        let EMPLOYEES = {};
+        let TOKENS = [];
+        let WEEKLY_PRICES = { Monday: 80, Tuesday: 80, Wednesday: 80, Thursday: 80, Friday: 80, Saturday: 80, Sunday: 80 };
         let alcMealItems = {};
+        
         const SYS_SESSION_KEY = `ent_sys_session_${appId}`;
         let loggedInSysUser = null;
         
@@ -152,7 +161,7 @@
                     document.getElementById('view-loading').classList.add('hidden');
                     document.getElementById('view-attendance').classList.remove('hidden');
                     loadData();
-                    setTimeout(() => document.getElementById('attendance-scanner').focus(), 300);
+                    setTimeout(() => keepFocus('attendance-scanner'), 300);
                 } else {
                     document.getElementById('view-loading').classList.add('hidden');
                     document.getElementById('view-unauthorized').classList.remove('hidden');
@@ -163,28 +172,43 @@
         initAuth();
 
         const loadData = () => {
-            // Load ALC Meals
-            onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'system_settings', 'canteen'), (docSnap) => {
-                if (docSnap.exists() && docSnap.data().alcMealItems) {
-                    alcMealItems = docSnap.data().alcMealItems;
-                    updateAlcDropdown();
-                }
-            });
-
-            // Listen to Personnel DB
-            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'personnel');
+            // Load Employees
+            const pRef = collection(db, 'artifacts', appId, 'public', 'data', 'employees');
             onSnapshot(pRef, (snap) => {
-                personnelList = [];
-                snap.forEach(doc => personnelList.push({ id: doc.id, ...doc.data() }));
+                EMPLOYEES = {};
+                snap.forEach(doc => { EMPLOYEES[doc.id] = { id: doc.id, ...doc.data() }; });
                 window.renderAttendance();
             });
 
-            // Listen to Attendance Logs
-            const aRef = collection(db, 'artifacts', appId, 'public', 'data', 'attendance_logs');
-            onSnapshot(aRef, (snap) => {
-                attendanceLogs = [];
-                snap.forEach(doc => attendanceLogs.push({ id: doc.id, ...doc.data() }));
+            // Load Tokens (Today's Logs)
+            const tRef = collection(db, 'artifacts', appId, 'public', 'data', 'tokens');
+            onSnapshot(tRef, (snap) => {
+                const today = getTodayStr();
+                TOKENS = [];
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.issuedDate === today) {
+                        TOKENS.push({ id: doc.id, ...data });
+                    }
+                });
                 window.renderAttendance();
+            });
+
+            // Load Settings (Prices and ALC Meals)
+            const settingsRef = collection(db, 'artifacts', appId, 'public', 'data', 'settings');
+            onSnapshot(settingsRef, (snap) => {
+                snap.forEach(docSnap => {
+                    const data = docSnap.data();
+                    // Load global prices
+                    if (docSnap.id === 'meal_prices' || data.prices) {
+                        WEEKLY_PRICES = data.prices || data.dailyRates || WEEKLY_PRICES;
+                    }
+                    // Load ALC Items (from canteen settings or wherever stored)
+                    if (data.alcMealItems) {
+                        alcMealItems = data.alcMealItems;
+                    }
+                });
+                updateAlcDropdown();
             });
         };
 
@@ -192,7 +216,7 @@
             const select = document.getElementById('alc-meal-select');
             select.innerHTML = '<option value="" disabled selected>-- Select ALC Meal Variety --</option>';
             Object.entries(alcMealItems).sort((a, b) => a[0].localeCompare(b[0])).forEach(([name, cost]) => {
-                select.innerHTML += `<option value="${name}">${name} (LKR ${cost.toFixed(2)})</option>`;
+                select.innerHTML += `<option value="${name}">${name} (LKR ${parseFloat(cost).toFixed(2)})</option>`;
             });
         }
 
@@ -205,23 +229,31 @@
             const title = document.getElementById('scanner-title');
             const icon = document.getElementById('scanner-input-icon');
             const input = document.getElementById('attendance-scanner');
+            const scannerContainer = document.getElementById('scanner-container');
 
             if (mode === 'STD') {
                 btnStd.className = "flex-1 py-3 bg-blue-600 text-white rounded-xl shadow-md text-sm font-bold transition-all";
                 btnAlc.className = "flex-1 py-3 bg-slate-800 text-slate-300 hover:bg-slate-700 rounded-xl text-sm font-bold transition-all";
                 
                 dropdownContainer.classList.add('hidden');
+                scannerContainer.classList.remove('hidden'); // Always show in STD mode
+                
                 header.className = "bg-gradient-to-r from-blue-600 to-blue-700 p-5 text-center text-white relative overflow-hidden flex justify-between items-center transition-colors";
                 title.innerHTML = '<i class="fas fa-barcode mr-3 opacity-70"></i> Hardware Identity Scanner';
                 
                 input.classList.remove('focus:border-indigo-500', 'focus:ring-indigo-500/20');
                 input.classList.add('focus:border-blue-500', 'focus:ring-blue-500/20');
                 icon.className = "absolute inset-y-0 left-6 flex items-center pointer-events-none text-blue-400 text-xl transition-colors";
+                
+                setTimeout(() => input.focus(), 100);
             } else {
                 btnAlc.className = "flex-1 py-3 bg-indigo-600 text-white rounded-xl shadow-md text-sm font-bold transition-all";
                 btnStd.className = "flex-1 py-3 bg-slate-800 text-slate-300 hover:bg-slate-700 rounded-xl text-sm font-bold transition-all";
                 
                 dropdownContainer.classList.remove('hidden');
+                document.getElementById('alc-meal-select').value = ""; // Reset dropdown
+                scannerContainer.classList.add('hidden'); // Hide scanner until meal is selected
+                
                 header.className = "bg-gradient-to-r from-indigo-600 to-indigo-700 p-5 text-center text-white relative overflow-hidden flex justify-between items-center transition-colors";
                 title.innerHTML = '<i class="fas fa-fish mr-3 opacity-70"></i> ALC Order Assignment';
                 
@@ -229,7 +261,19 @@
                 input.classList.add('focus:border-indigo-500', 'focus:ring-indigo-500/20');
                 icon.className = "absolute inset-y-0 left-6 flex items-center pointer-events-none text-indigo-400 text-xl transition-colors";
             }
-            setTimeout(() => input.focus(), 100);
+        };
+
+        // When ALC Meal is selected, reveal the scanner
+        window.handleAlcSelection = () => {
+            const val = document.getElementById('alc-meal-select').value;
+            const scannerContainer = document.getElementById('scanner-container');
+            
+            if (val) {
+                scannerContainer.classList.remove('hidden');
+                setTimeout(() => document.getElementById('attendance-scanner').focus(), 100);
+            } else {
+                scannerContainer.classList.add('hidden');
+            }
         };
 
         window.renderAttendance = () => {
@@ -237,29 +281,34 @@
             const term = (document.getElementById('attendance-search')?.value || '').toLowerCase();
             const today = getTodayStr();
             
-            const todayLogs = attendanceLogs.filter(log => log.date === today);
             const markedLogsMap = {};
-            todayLogs.forEach(l => markedLogsMap[l.empId] = l);
+            TOKENS.forEach(t => markedLogsMap[t.empId] = t);
 
             let html = '';
             let totalActive = 0;
             let clearedCount = 0;
 
-            const filteredPersonnel = personnelList.filter(p => {
-                if(p.status !== 'ACTIVE') return false;
+            let filteredPersonnel = Object.values(EMPLOYEES).filter(p => {
+                // Assuming status check based on index.html logic, normally active
                 totalActive++; 
-                return p.name.toLowerCase().includes(term) || p.empId.toLowerCase().includes(term) || p.department.toLowerCase().includes(term);
+                const pId = p.id || p.empId || '';
+                const pName = p.name || '';
+                const pDept = p.dept || p.department || '';
+                return pName.toLowerCase().includes(term) || pId.toLowerCase().includes(term) || pDept.toLowerCase().includes(term);
             });
 
             filteredPersonnel.sort((a, b) => {
-                const aMarked = !!markedLogsMap[a.empId];
-                const bMarked = !!markedLogsMap[b.empId];
-                if (aMarked === bMarked) return a.name.localeCompare(b.name);
+                const aId = a.id || a.empId;
+                const bId = b.id || b.empId;
+                const aMarked = !!markedLogsMap[aId];
+                const bMarked = !!markedLogsMap[bId];
+                if (aMarked === bMarked) return (a.name || '').localeCompare(b.name || '');
                 return aMarked ? 1 : -1; 
             });
 
             filteredPersonnel.forEach(p => {
-                const log = markedLogsMap[p.empId];
+                const pId = p.id || p.empId;
+                const log = markedLogsMap[pId];
                 const isMarked = !!log;
                 if (isMarked) clearedCount++;
 
@@ -270,13 +319,13 @@
                     <div class="flex items-center justify-between p-4 rounded-2xl border ${isMarked ? 'bg-emerald-900/10 border-emerald-900/40' : 'bg-slate-800 border-slate-700'} hover:shadow-lg transition-all duration-300">
                         <div class="flex items-center gap-4">
                             <div class="w-12 h-12 rounded-full ${isMarked ? 'bg-emerald-900/30 text-emerald-400' : 'bg-slate-700 text-slate-300'} flex items-center justify-center font-bold text-lg shadow-inner">
-                                ${p.name.charAt(0)}
+                                ${(p.name || 'U').charAt(0)}
                             </div>
                             <div>
                                 <h4 class="font-bold text-white text-base">${p.name}</h4>
                                 <div class="text-xs text-slate-400 flex items-center mt-1">
-                                    <span class="font-mono bg-slate-700 px-1.5 py-0.5 rounded border border-slate-600 mr-2">${p.empId}</span>
-                                    <span>${p.department}</span>
+                                    <span class="font-mono bg-slate-700 px-1.5 py-0.5 rounded border border-slate-600 mr-2">${pId}</span>
+                                    <span>${p.dept || p.department || '-'}</span>
                                     ${mealLabel}
                                 </div>
                             </div>
@@ -287,12 +336,12 @@
                                     <div class="flex items-center gap-2 text-emerald-400 font-extrabold text-sm bg-emerald-900/30 px-4 py-2.5 rounded-xl border border-emerald-800/50 shadow-sm">
                                         <i class="fas fa-check-circle"></i> <span class="hidden sm:inline">Cleared</span>
                                     </div>
-                                    <button onclick="reviseAttendance('${p.empId}', '${p.name}')" class="text-slate-400 hover:text-red-400 bg-slate-800 hover:bg-red-900/40 w-10 h-10 flex items-center justify-center rounded-xl transition-all shadow-sm border border-slate-700 hover:border-red-800/50" title="Revise/Undo Attendance">
+                                    <button onclick="reviseAttendance('${log.id}', '${p.name.replace(/'/g, "\\'")}', '${log.status}')" class="text-slate-400 hover:text-red-400 bg-slate-800 hover:bg-red-900/40 w-10 h-10 flex items-center justify-center rounded-xl transition-all shadow-sm border border-slate-700 hover:border-red-800/50" title="Revise/Undo Attendance">
                                         <i class="fas fa-arrow-rotate-left"></i>
                                     </button>
                                 </div>
                             ` : `
-                                <button onclick="document.getElementById('attendance-scanner').value='${p.empId}'; executeScan('${p.empId}');" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2.5 rounded-xl shadow-[0_0_15px_rgba(37,99,235,0.3)] transition-transform active:scale-95 text-sm flex items-center gap-2">
+                                <button onclick="document.getElementById('attendance-scanner').value='${pId}'; executeScan('${pId}');" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2.5 rounded-xl shadow-[0_0_15px_rgba(37,99,235,0.3)] transition-transform active:scale-95 text-sm flex items-center gap-2">
                                     <i class="fas fa-qrcode"></i> <span class="hidden sm:inline">Mark</span> Present
                                 </button>
                             `}
@@ -326,12 +375,19 @@
             
             showScanResultModal('VERIFYING...', 'Processing...', 'info');
 
-            const emp = personnelList.find(p => p.empId === val || p.id === val);
-            if (!emp || emp.status !== 'ACTIVE') {
-                return showScanResultModal('ACCESS DENIED', 'Invalid or Inactive Terminal ID', 'error');
+            // Find employee
+            let emp = EMPLOYEES[val];
+            if (!emp) {
+                emp = Object.values(EMPLOYEES).find(e => e.id === val || e.empId === val);
             }
 
-            const isAlcEmp = (emp.companyName || emp.company || '').toUpperCase().includes('ALC');
+            if (!emp) {
+                return showScanResultModal('ACCESS DENIED', 'Invalid Terminal ID', 'error');
+            }
+
+            const pId = emp.id || emp.empId;
+            const company = (emp.companyName || emp.company || '').toUpperCase();
+            const isAlcEmp = company.includes('ALC');
 
             // --- Enforce Tab Rules ---
             if (scanMode === 'ALC' && !isAlcEmp) {
@@ -341,42 +397,55 @@
                 return showScanResultModal('MODE CONFLICT', 'ALC personnel require meal selection. Switch to ALC Menu.', 'warning');
             }
 
-            // ALC Selection Check
+            // Meal Setup & Costs
             let mealName = null;
-            let costApplied = 0;
+            let appliedCost = 0;
 
             if (scanMode === 'ALC') {
                 mealName = document.getElementById('alc-meal-select').value;
                 if (!mealName) return showScanResultModal('MISSING SELECTION', 'Please select an ALC meal variety.', 'warning');
-                costApplied = alcMealItems[mealName] || 0;
+                appliedCost = parseFloat(alcMealItems[mealName]) || 0;
+            } else {
+                const todayName = new Date().toLocaleDateString('en-US', {weekday: 'long'});
+                appliedCost = parseFloat(WEEKLY_PRICES[todayName]) || 80;
             }
 
-            const today = getTodayStr();
-            const alreadyMarked = attendanceLogs.find(log => log.date === today && log.empId === emp.empId);
+            const todayStr = getTodayStr();
+            const alreadyMarked = TOKENS.find(t => t.empId === pId && t.issuedDate === todayStr);
 
             if (alreadyMarked) {
                 return showScanResultModal('ALREADY ACTIVE', `${emp.name} has already accessed.`, 'warning');
             }
 
-            const docId = `${today}_${emp.empId}`;
-            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'attendance_logs', docId);
             try {
                 const payload = {
-                    empId: emp.empId,
-                    date: today,
-                    mealRedeemed: false, 
-                    markedAt: serverTimestamp(),
-                    markedBy: loggedInSysUser?.username || 'SYSTEM'
+                    tokenString: `TKN-${Math.floor(Math.random()*10000)}`,
+                    empId: pId,
+                    empName: emp.name,
+                    dept: emp.dept || emp.department || '',
+                    company: emp.companyName || emp.company || '',
+                    account: emp.accountName || emp.account || '',
+                    site: emp.site || '-',
+                    issuedDate: todayStr,
+                    status: 'ISSUED',
+                    issuedAt: serverTimestamp(),
+                    issuedBy: auth.currentUser.uid,
+                    issuedBySysUser: loggedInSysUser?.username || 'SYSTEM',
+                    costs: { total: appliedCost }
                 };
 
-                // Add ALC specifics if applicable
-                if (scanMode === 'ALC') {
+                if (scanMode === 'ALC' && mealName) {
                     payload.mealName = mealName;
-                    payload.costApplied = costApplied;
                 }
 
-                await setDoc(ref, payload);
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'tokens'), payload);
                 
+                // Reset ALC Scanner UI to require explicit selection for next person
+                if (scanMode === 'ALC') {
+                    document.getElementById('alc-meal-select').value = "";
+                    document.getElementById('scanner-container').classList.add('hidden');
+                }
+
                 const mealMsg = mealName ? `\nSelected: ${mealName}` : '';
                 showScanResultModal('ENTRY APPROVED', `${emp.name}${mealMsg}`, 'success');
             } catch (e) {
@@ -389,7 +458,8 @@
             if (event.key === 'Enter') {
                 if(scanDebounceTimer) clearTimeout(scanDebounceTimer);
                 executeScan(event.target.value.trim().toUpperCase());
-                event.target.value = ''; event.target.focus();
+                event.target.value = ''; 
+                event.target.focus();
             }
         };
         
@@ -399,7 +469,8 @@
                 const val = event.target.value.trim().toUpperCase();
                 if (val.length >= 2) { 
                     executeScan(val);
-                    event.target.value = ''; event.target.focus();
+                    event.target.value = ''; 
+                    event.target.focus();
                 }
             }, 10);
         };
@@ -411,8 +482,9 @@
                 
                 const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
                 const isDropdownFocused = activeTag === 'select';
+                const isContainerHidden = document.getElementById('scanner-container').classList.contains('hidden');
 
-                if (el && document.activeElement !== el && isAttendanceView && !isDropdownFocused) {
+                if (el && document.activeElement !== el && isAttendanceView && !isDropdownFocused && !isContainerHidden) {
                     el.focus();
                 }
             }, 100);
@@ -439,23 +511,20 @@
             if(html5QrcodeScanner) html5QrcodeScanner.stop().catch(()=>{});
         };
 
-        window.reviseAttendance = async (empId, empName) => {
+        window.reviseAttendance = async (tokenId, empName, status) => {
             if (!auth.currentUser || !loggedInSysUser) return;
-            const today = getTodayStr();
             
-            const existingLog = attendanceLogs.find(log => log.date === today && log.empId === empId);
-            if (existingLog && existingLog.mealRedeemed) {
-                window.showToast(`Cannot revise: ${empName} has already redeemed their meal.`, 'error');
+            if (status === 'CONSUMED') {
+                window.showToast(`Cannot revise: ${empName} has already redeemed their meal at the counter.`, 'error');
                 return;
             }
 
-            if(!confirm(`Revoke attendance for ${empName}?`)) return;
+            if(!confirm(`Revoke attendance entry for ${empName}?`)) return;
 
-            const docId = `${today}_${empId}`;
-            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'attendance_logs', docId);
+            const ref = doc(db, 'artifacts', appId, 'public', 'data', 'tokens', tokenId);
             try {
                 await deleteDoc(ref);
-                window.showToast(`Attendance for ${empName} has been revoked.`, 'success');
+                window.showToast(`Attendance entry for ${empName} has been revoked.`, 'success');
             } catch (e) {
                 console.error("Error:", e);
                 window.showToast("System fault: Failed to revise attendance.", "error");
@@ -540,20 +609,22 @@
                     <button onclick="startWebcamScanner()" class="bg-white/10 hover:bg-white/20 text-white font-bold text-xs px-4 py-2 rounded-xl transition shadow-sm border border-white/20 flex items-center"><i class="fas fa-camera mr-2"></i> Optical Scan</button>
                 </div>
                 
-                <div class="p-6 flex flex-col items-center bg-slate-900/50">
+                <div class="p-6 flex flex-col items-center bg-slate-900/50 min-h-[160px] justify-center">
                     
                     <!-- ALC Selection Dropdown -->
-                    <div id="alc-dropdown-container" class="w-full max-w-2xl mb-5 hidden animate-fade-in">
+                    <div id="alc-dropdown-container" class="w-full max-w-2xl mb-2 hidden animate-fade-in">
                         <label class="text-[10px] font-bold text-indigo-400 uppercase tracking-widest block mb-2"><i class="fas fa-concierge-bell mr-1"></i> Select Meal Variety (Required)</label>
                         <div class="relative">
-                            <select id="alc-meal-select" class="w-full border-2 border-indigo-500/50 rounded-xl px-4 py-4 bg-slate-800 text-white focus:ring-4 focus:ring-indigo-500/20 outline-none transition font-bold appearance-none cursor-pointer" onchange="keepFocus('attendance-scanner')">
+                            <select id="alc-meal-select" class="w-full border-2 border-indigo-500/50 rounded-xl px-4 py-4 bg-slate-800 text-white focus:ring-4 focus:ring-indigo-500/20 outline-none transition font-bold appearance-none cursor-pointer" onchange="handleAlcSelection()">
                                 <option value="" disabled selected>-- Select ALC Meal Variety --</option>
                             </select>
                             <div class="absolute right-5 top-5 pointer-events-none text-indigo-400"><i class="fas fa-chevron-down"></i></div>
                         </div>
+                        <p class="text-xs text-slate-500 mt-3 text-center"><i class="fas fa-info-circle mr-1"></i> Scanner will activate automatically after meal selection.</p>
                     </div>
 
-                    <div class="w-full relative max-w-2xl">
+                    <!-- Scan Input Field (Hidden until Meal Selected in ALC Mode) -->
+                    <div id="scanner-container" class="w-full relative max-w-2xl animate-fade-in">
                         <div id="scanner-input-icon" class="absolute inset-y-0 left-6 flex items-center pointer-events-none text-blue-400 text-xl transition-colors"><i class="fas fa-qrcode"></i></div>
                         <input type="password" id="attendance-scanner" inputmode="none" placeholder="SCAN PERSONNEL QR..." class="w-full pl-16 pr-6 py-5 border-2 border-slate-600 rounded-2xl bg-slate-900 focus:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 font-mono text-center text-2xl outline-none transition scanner-input shadow-inner text-white" onkeydown="handleScannerInput(event)" oninput="handleAutoScan(event)" onblur="keepFocus('attendance-scanner')" autocomplete="off">
                     </div>
