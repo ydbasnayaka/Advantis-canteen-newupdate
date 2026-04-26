@@ -141,7 +141,13 @@
         function formatRs(amount) {
             return 'Rs. ' + amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
-        function getTodayStr() { return new Date().toISOString().split('T')[0]; }
+        function getTodayStr() { 
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+        }
         
         function getDayName(dateString) {
             if (!dateString) return '';
@@ -212,10 +218,10 @@
                 }
             }, (error) => console.error("Error fetching system users:", error));
 
-            // 2. Fetch settings
-            const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'canteen');
-            onSnapshot(settingsRef, (docSnap) => {
-                if (docSnap.exists()) {
+            // 2. Fetch settings (Listen to the whole collection in case the doc ID isn't exactly 'canteen')
+            const settingsRef = collection(db, 'artifacts', appId, 'public', 'data', 'settings');
+            onSnapshot(settingsRef, (snap) => {
+                snap.forEach(docSnap => {
                     const data = docSnap.data();
                     if (data.dailyRates) {
                         dailyRates = data.dailyRates;
@@ -226,7 +232,7 @@
                             "Thursday": val, "Friday": val, "Saturday": val
                         };
                     }
-                }
+                });
                 calculateDashboardStats();
             }, (error) => console.error("Error fetching settings:", error));
 
@@ -257,14 +263,25 @@
             let mIssued = 0, mRedeemed = 0, mValue = 0;
 
             allTokens.forEach(log => {
-                const isRedeemed = log.mealRedeemed === true;
-                const logDate = log.date;
+                // Support multiple ways "redeemed" might be stored
+                const isRedeemed = log.mealRedeemed === true || log.mealRedeemed === 'true' || log.status === 'REDEEMED' || log.isRedeemed === true;
+                
+                // Extract date from log safely (handles standard string or Firebase Timestamp)
+                let logDate = log.date;
+                if (!logDate && log.timestamp) {
+                    if (typeof log.timestamp.toDate === 'function') {
+                        const d = log.timestamp.toDate();
+                        logDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+                    } else if (typeof log.timestamp === 'string') {
+                        logDate = log.timestamp.split('T')[0];
+                    }
+                }
+                
+                if (!logDate) return;
                 
                 let rateForDay = 0;
-                if (logDate) {
-                    const dayName = getDayName(logDate);
-                    rateForDay = parseFloat(dailyRates[dayName]) || 0;
-                }
+                const dayName = getDayName(logDate);
+                rateForDay = parseFloat(dailyRates[dayName]) || 0;
 
                 if (logDate === todayStr) {
                     tIssued++;
@@ -274,7 +291,7 @@
                     }
                 }
 
-                if (logDate && logDate.startsWith(monthStr)) {
+                if (logDate.startsWith(monthStr)) {
                     mIssued++;
                     if (isRedeemed) {
                         mRedeemed++;
